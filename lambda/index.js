@@ -671,6 +671,34 @@ const SessionEndedRequestHandler = {
   }
 };
 
+// PlaybackController (hardware / app transport controls)
+const PlaybackControllerHandler = {
+  canHandle(handlerInput) {
+    const type = Alexa.getRequestType(handlerInput.requestEnvelope);
+    return typeof type === 'string' && type.startsWith('PlaybackController.');
+  },
+  async handle(handlerInput) {
+    const type = Alexa.getRequestType(handlerInput.requestEnvelope);
+    if (type === 'PlaybackController.PauseCommandIssued') {
+      return handlerInput.responseBuilder.addAudioPlayerStopDirective().withShouldEndSession(true).getResponse();
+    }
+    if (type === 'PlaybackController.PlayCommandIssued') {
+      // Resume
+      const state = await getState(handlerInput.attributesManager);
+      if (state.lastUrl && state.lastToken != null) {
+        const directive = buildPlayDirective(state.lastUrl, state.lastToken, state.lastOffsetMs || 0);
+        return handlerInput.responseBuilder.addDirective(directive).withShouldEndSession(true).getResponse();
+      }
+      return handlerInput.responseBuilder.speak('Nothing to play yet. Say, play Morning Brew.').getResponse();
+    }
+    // Next/Previous etc.
+    return handlerInput.responseBuilder
+      .speak('Only the latest episode is supported.')
+      .reprompt('You can say, play Morning Brew.')
+      .getResponse();
+  }
+};
+
 const ErrorHandler = {
   canHandle() {
     return true;
@@ -701,6 +729,7 @@ exports.handler = skillBuilder
     PlaybackNearlyFinishedHandler,
     PlaybackFinishedHandler,
     PlaybackFailedHandler,
+    PlaybackControllerHandler,
     SessionEndedRequestHandler
   )
   .addErrorHandlers(ErrorHandler)
