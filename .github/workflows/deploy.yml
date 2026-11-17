@@ -12,12 +12,11 @@ jobs:
       SKILL_ID: amzn1.ask.skill.8731ea2f-6df5-4445-a307-582ff944ab13
       ASK_REFRESH_TOKEN: ${{ secrets.ASK_REFRESH_TOKEN }}
       ASK_VENDOR_ID: ${{ secrets.ASK_VENDOR_ID }}
-      ASK_ACCESS_TOKEN: ${{ secrets.ASK_ACCESS_TOKEN }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
+      
       - name: Verify required secrets
         run: |
           missing=0
@@ -39,31 +38,69 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: 20
 
-      - name: Install ASK CLI
-        run: npm i -g ask-cli@2
+      - name: Install ASK CLI and jq
+        run: |
+          npm i -g ask-cli@2
+          sudo apt-get update
+          sudo apt-get install -y jq
 
       - name: Prepare Lambda dependencies
         working-directory: lambda
-        run: npm ci --omit=dev || npm install --omit=dev
+        run: npm install --omit=dev
 
       - name: Node syntax check
         run: node --check lambda/index.js
 
-      - name: Write Gemini key file (gitignored)
-        if: env.GEMINI_API_KEY != ''
+      - name: Create ASK CLI profile config (~/.ask/cli_config)
+        env:
+          ASK_REFRESH_TOKEN: ${{ secrets.ASK_REFRESH_TOKEN }}
+          ASK_VENDOR_ID: ${{ secrets.ASK_VENDOR_ID }}
         run: |
-          echo "module.exports = { GEMINI_API_KEY: '${GEMINI_API_KEY//'/'\\'/'}' };" > lambda/gemini-key.js
-          echo "Wrote lambda/gemini-key.js"
+          mkdir -p "${HOME}/.ask"
+          node -e "const fs=require('fs');const p=require('path');const cfg={profiles:{default:{vendor_id:process.env.ASK_VENDOR_ID,token:{access_token:'',refresh_token:process.env.ASK_REFRESH_TOKEN,token_type:'bearer',expires_in:0,expires_at:'1970-01-01T00:00:00.000Z'},code:{default:{src:'lambda'}},skillMetadata:{src:'skill-package'},skillInfrastructure:{type:'@ask-cli/hosted-skill-deployer'}}}};fs.writeFileSync(p.join(process.env.HOME,'.ask','cli_config'),JSON.stringify(cfg));"
+          echo "ASK profile written."
 
-      - name: Validate ASK connectivity
+      - name: Validate ASK connectivity (get skill status)
         run: |
-          # Print vendor to confirm auth; if this fails, tokens are invalid
-          ask smapi list-vendors || (echo "::error title=ASK CLI auth failed::Ensure ASK_REFRESH_TOKEN and ASK_VENDOR_ID are valid."; exit 1)
+          ask smapi get-skill-status -s "$SKILL_ID" --profile default >/dev/null 2>&1 || { echo "::error title=ASK CLI auth failed::Ensure ASK_REFRESH_TOKEN and ASK_VENDOR_ID are valid for skill $SKILL_ID."; exit 1; }
+          echo "ASK connectivity OK."
 
-      - name: Deploy to Alexa Hosted (code + model)
+      - name: Resolve Alexa Hosted repository URL
+        id: hosted
         run: |
-          # Deploy both skill-package and lambda; hosted skills deploy to their Amazon-hosted git repo
-          ask deploy --ignore-hash
+          REPO_URL="$(ask smapi get-alexa-hosted-skill-metadata -s "$SKILL_ID" --profile default | jq -r '.alexaHosted.repository.url')"
+          if [ -z "$REPO_URL" ] || [ "$REPO_URL" = "null" ]; then
+            echo "::error title=Hosted repo not found::Could not obtain Alexa Hosted repository URL for $SKILL_ID."
+            exit 1
+          fi
+          echo "repo_url=$REPO_URL" >> "$GITHUB_OUTPUT"
+          echo "Hosted repo URL resolved."
+
+      - name: Configure Git credential helper for ASK
+        run: |
+          git config --global credential.helper '!ask util git-credentials-helper'
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Push to Alexa Hosted repository (master)
+        env:
+          REPO_URL: ${{ steps.hosted.outputs.repo_url }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          # Add remote for hosted repo
+          git remote add alexa "$REPO_URL" || git remote set-url alexa "$REPO_URL"
+          # Create a CI-only branch that includes the Gemini key file (never pushed to GitHub)
+          DEP_BRANCH="ci/alexa-deploy-${GITHUB_SHA}"
+          git checkout -b "$DEP_BRANCH"
+          if [ -n "$GEMINI_API_KEY" ]; then
+            node -e "const fs=require('fs');const k=process.env.GEMINI_API_KEY||'';const v='module.exports = { GEMINI_API_KEY: \\''+k.replace(/'/g,\"\\\\'\")+'\\' };';fs.writeFileSync('lambda/gemini-key.js',v);"
+            git add lambda/gemini-key.js
+            git commit -m "ci: add gemini key for hosted deploy (CI-only)"
+          fi
+          # Force-push current HEAD to hosted master (dev stage)
+          git push --force alexa HEAD:master
+          # Return to the original branch (no changes pushed to GitHub)
+          git checkout -
 
