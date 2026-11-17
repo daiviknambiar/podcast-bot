@@ -16,6 +16,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       
       - name: Verify required secrets
         run: |
@@ -80,7 +82,7 @@ jobs:
 
       - name: Configure Git credential helper for ASK
         run: |
-          git config --global credential.helper '!ask util git-credentials-helper'
+          git config --global credential.helper '!ask util git-credentials-helper --profile default'
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
@@ -96,11 +98,12 @@ jobs:
           git checkout -b "$DEP_BRANCH"
           if [ -n "$GEMINI_API_KEY" ]; then
             node -e "const fs=require('fs');const k=process.env.GEMINI_API_KEY||'';const v='module.exports = { GEMINI_API_KEY: \\''+k.replace(/'/g,\"\\\\'\")+'\\' };';fs.writeFileSync('lambda/gemini-key.js',v);"
-            git add lambda/gemini-key.js
+            git add -f lambda/gemini-key.js
             git commit -m "ci: add gemini key for hosted deploy (CI-only)"
           fi
           # Force-push current HEAD to hosted master (dev stage)
-          git push --force alexa HEAD:master
+          set -x
+          git push --force alexa HEAD:master || { echo "::group::Git push debug"; git remote -v; git status; git log --oneline -n 10; echo "::endgroup::"; exit 1; }
           # Return to the original branch (no changes pushed to GitHub)
           git checkout -
 
