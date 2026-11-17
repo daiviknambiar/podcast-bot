@@ -99,55 +99,43 @@ jobs:
 
       - name: Configure Git credential helper for ASK
         run: |
-          git config --global credential.helper '!ask util git-credentials-helper --profile default'
+          git config --global credential.helper '!ask util git-credentials-helper'
 
-      - name: Deploy via ask deploy (hosted)
-        id: ask_deploy
+      - name: Push to Alexa Hosted via helper
+        id: push_helper
         continue-on-error: true
+        env:
+          REPO_URL: ${{ steps.hosted.outputs.repo_url }}
         run: |
-          ask deploy --ignore-hash --profile default
-      
-      - name: Generate hosted repo credentials
-        if: steps.ask_deploy.outcome == 'failure'
-        id: creds
+          git remote add alexa "$REPO_URL" || git remote set-url alexa "$REPO_URL"
+          GIT_TRACE=0 git push --force alexa HEAD:master
+
+      - name: Fallback push via credential-store
+        if: steps.push_helper.outcome == 'failure'
+        env:
+          REPO_URL: ${{ steps.hosted.outputs.repo_url }}
         run: |
-          CREDS_JSON="$(ask smapi generate-credentials-for-alexa-hosted-skill -s "$SKILL_ID" --repository-url '${{ steps.hosted.outputs.repo_url }}' --repository-type GIT --profile default)"
+          # Generate short-lived credentials
+          CREDS_JSON="$(ask smapi generate-credentials-for-alexa-hosted-skill -s "$SKILL_ID" --repository-url "$REPO_URL" --repository-type GIT --profile default)"
           USERNAME="$(printf "%s" "$CREDS_JSON" | jq -r '..|.username? // .userName? // empty' | head -n1)"
           PASSWORD="$(printf "%s" "$CREDS_JSON" | jq -r '..|.password? // .pass? // empty' | head -n1)"
           if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
-            echo "::error title=Failed to obtain hosted repo credentials::Could not parse username/password from SMAPI response."
+            echo "::error title=Hosted credentials error::Could not parse username/password from SMAPI response."
             exit 1
           fi
-          echo "user_raw=$USERNAME" >> "$GITHUB_OUTPUT"
-          echo "pass_raw=$PASSWORD" >> "$GITHUB_OUTPUT"
-
-      - name: Clone Alexa Hosted repository
-        if: steps.ask_deploy.outcome == 'failure'
-        run: |
-          rm -rf alexa-hosted
-          ask clone -s "$SKILL_ID" --profile default alexa-hosted
-
-      - name: Copy project files into hosted repo
-        if: steps.ask_deploy.outcome == 'failure'
-        run: |
-          rsync -a --delete skill-package/ alexa-hosted/skill-package/
-          rsync -a --delete lambda/ alexa-hosted/lambda/
-
-      - name: Commit and push to Alexa Hosted (master)
-        if: steps.ask_deploy.outcome == 'failure'
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          REPO_URL: ${{ steps.hosted.outputs.repo_url }}
-        run: |
-          cd alexa-hosted
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          if [ -n "$GEMINI_API_KEY" ]; then
-            node -e "const fs=require('fs');const k=process.env.GEMINI_API_KEY||'';const v='module.exports = { GEMINI_API_KEY: \\''+k.replace(/'/g,\"\\\\'\")+'\\' };';fs.writeFileSync('lambda/gemini-key.js',v);"
-            git add -f lambda/gemini-key.js
-          fi
-          git add skill-package lambda
-          git commit -m "ci: deploy from GitHub Actions"
-          BASIC="$(printf "%s:%s" "${{ steps.creds.outputs.user_raw }}" "${{ steps.creds.outputs.pass_raw }}" | base64 | tr -d '\n')"
-          git -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" push --force origin HEAD:master
+          echo "::add-mask::$USERNAME"
+          echo "::add-mask::$PASSWORD"
+          # Build credential-store file scoped to this host/path
+          CRED_FILE="$(mktemp)"
+          HOST="$(node -e "const u=new URL(process.argv[1]);process.stdout.write(u.host);" "$REPO_URL")"
+          PATHNAME="$(node -e "const u=new URL(process.argv[1]);process.stdout.write(u.pathname);" "$REPO_URL")"
+          {
+            echo "protocol=https"
+            echo "host=$HOST"
+            echo "path=$PATHNAME"
+            echo "username=$USERNAME"
+            echo "password=$PASSWORD"
+          } | git -c credential.helper="store --file $CRED_FILE" credential-store store
+          # Push using only this temporary credential store
+          GIT_TRACE=0 git -c credential.helper="store --file $CRED_FILE" push --force alexa HEAD:master
 
