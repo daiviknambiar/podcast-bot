@@ -1,0 +1,69 @@
+name: Deploy Alexa Hosted Skill
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      SKILL_ID: amzn1.ask.skill.8731ea2f-6df5-4445-a307-582ff944ab13
+      ASK_REFRESH_TOKEN: ${{ secrets.ASK_REFRESH_TOKEN }}
+      ASK_VENDOR_ID: ${{ secrets.ASK_VENDOR_ID }}
+      ASK_ACCESS_TOKEN: ${{ secrets.ASK_ACCESS_TOKEN }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify required secrets
+        run: |
+          missing=0
+          if [ -z "$ASK_REFRESH_TOKEN" ]; then
+            echo "::error title=Missing secret::ASK_REFRESH_TOKEN is required. See README for how to obtain it."
+            missing=1
+          fi
+          if [ -z "$ASK_VENDOR_ID" ]; then
+            echo "::error title=Missing secret::ASK_VENDOR_ID is required. See README for where to find it."
+            missing=1
+          fi
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "::warning title=Optional secret missing::GEMINI_API_KEY not set; AskAboutIntent will not work until you add it."
+          fi
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install ASK CLI
+        run: npm i -g ask-cli@2
+
+      - name: Prepare Lambda dependencies
+        working-directory: lambda
+        run: npm ci --omit=dev
+
+      - name: Node syntax check
+        run: node --check lambda/index.js
+
+      - name: Write Gemini key file (gitignored)
+        if: env.GEMINI_API_KEY != ''
+        run: |
+          echo "module.exports = { GEMINI_API_KEY: '${GEMINI_API_KEY//'/'\\'/'}' };" > lambda/gemini-key.js
+          echo "Wrote lambda/gemini-key.js"
+
+      - name: Validate ASK connectivity
+        run: |
+          # Print vendor to confirm auth; if this fails, tokens are invalid
+          ask smapi list-vendors || (echo "::error title=ASK CLI auth failed::Ensure ASK_REFRESH_TOKEN and ASK_VENDOR_ID are valid."; exit 1)
+
+      - name: Deploy to Alexa Hosted (code + model)
+        run: |
+          # Deploy both skill-package and lambda; hosted skills deploy to their Amazon-hosted git repo
+          ask deploy --ignore-hash
+

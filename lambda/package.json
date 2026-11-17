@@ -1,0 +1,17 @@
+{
+  "name": "podcast-bot",
+  "version": "1.0.0",
+  "description": "Alexa-hosted skill to play Morning Brew Daily and answer questions about what you just heard.",
+  "main": "index.js",
+  "engines": {
+    "node": ">=16"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "ask-sdk-core": "^2.13.0",
+    "ask-sdk-model": "^1.74.0",
+    "ask-sdk-s3-persistence-adapter": "^2.13.0",
+    "aws-sdk": "^2.1481.0"
+  }
+}
+

@@ -1,0 +1,20 @@
+{
+  "askcliResourcesVersion": "2020-03-31",
+  "profiles": {
+    "default": {
+      "skillInfrastructure": {
+        "type": "@ask-cli/hosted-skill-deployer"
+      },
+      "skillId": "amzn1.ask.skill.8731ea2f-6df5-4445-a307-582ff944ab13",
+      "code": {
+        "default": {
+          "src": "lambda"
+        }
+      },
+      "skillMetadata": {
+        "src": "skill-package"
+      }
+    }
+  }
+}
+

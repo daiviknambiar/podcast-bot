@@ -1,0 +1,17 @@
+node_modules/
+npm-debug.log*
+yarn.lock
+package-lock.json
+.DS_Store
+.ask/
+.vscode/
+.idea/
+
+# Lambda local artifacts
+lambda/gemini-key.js
+lambda/*.zip
+
+# Logs
+*.log
+logs/
+

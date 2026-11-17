@@ -1,0 +1,30 @@
+{
+  "manifest": {
+    "publishingInformation": {
+      "locales": {
+        "en-US": {
+          "name": "Podcast Bot",
+          "summary": "Plays the latest Morning Brew Daily and answers what-you-just-heard.",
+          "description": "Podcast Bot plays the newest Morning Brew Daily episode and can answer questions about what was just said by analyzing the last ~75 seconds of audio with Gemini."
+        }
+      },
+      "isAvailableWorldwide": true,
+      "testingInstructions": "Try: 'Alexa, ask Podcast Bot to play Morning Brew', then 'what did I just miss?'.",
+      "category": "NEWS"
+    },
+    "apis": {
+      "custom": {}
+    },
+    "manifestVersion": "1.0",
+    "permissions": [],
+    "events": {
+      "endpoint": {}
+    },
+    "interfaces": [
+      {
+        "type": "AUDIO_PLAYER"
+      }
+    ]
+  }
+}
+
