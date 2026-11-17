@@ -69,6 +69,18 @@ jobs:
           ask smapi get-skill-status -s "$SKILL_ID" --profile default >/dev/null 2>&1 || { echo "::error title=ASK CLI auth failed::Ensure ASK_REFRESH_TOKEN and ASK_VENDOR_ID are valid for skill $SKILL_ID."; exit 1; }
           echo "ASK connectivity OK."
 
+      - name: Prepare CI-only branch with Gemini key (not pushed to GitHub)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          DEP_BRANCH="ci/alexa-deploy-${GITHUB_SHA}"
+          git checkout -b "$DEP_BRANCH"
+          if [ -n "$GEMINI_API_KEY" ]; then
+            node -e "const fs=require('fs');const k=process.env.GEMINI_API_KEY||'';const v='module.exports = { GEMINI_API_KEY: \\''+k.replace(/'/g,\"\\\\'\")+'\\' };';fs.writeFileSync('lambda/gemini-key.js',v);"
+            git add -f lambda/gemini-key.js
+            git commit -m "ci: add gemini key for hosted deploy (CI-only)"
+          fi
+
       - name: Resolve Alexa Hosted repository URL
         id: hosted
         run: |
@@ -82,25 +94,25 @@ jobs:
 
       - name: Configure Git credential helper for ASK
         run: |
-          git config --global credential.helper '!ask util git-credentials-helper --profile default --hosted-skill-id '"$SKILL_ID"
+          git config --global credential.helper '!ask util git-credentials-helper --profile default'
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Push to Alexa Hosted repository (master)
+      - name: Deploy via ask deploy (hosted)
+        id: ask_deploy
+        continue-on-error: true
+        run: |
+          ask deploy --ignore-hash --profile default
+
+      - name: Push to Alexa Hosted repository (master) [fallback]
+        if: steps.ask_deploy.outcome == 'failure'
         env:
           REPO_URL: ${{ steps.hosted.outputs.repo_url }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ASK_PROFILE: default
         run: |
           # Add remote for hosted repo
           git remote add alexa "$REPO_URL" || git remote set-url alexa "$REPO_URL"
-          # Create a CI-only branch that includes the Gemini key file (never pushed to GitHub)
-          DEP_BRANCH="ci/alexa-deploy-${GITHUB_SHA}"
-          git checkout -b "$DEP_BRANCH"
-          if [ -n "$GEMINI_API_KEY" ]; then
-            node -e "const fs=require('fs');const k=process.env.GEMINI_API_KEY||'';const v='module.exports = { GEMINI_API_KEY: \\''+k.replace(/'/g,\"\\\\'\")+'\\' };';fs.writeFileSync('lambda/gemini-key.js',v);"
-            git add -f lambda/gemini-key.js
-            git commit -m "ci: add gemini key for hosted deploy (CI-only)"
-          fi
           # Force-push current HEAD to hosted master (dev stage)
           set -x
           git push --force alexa HEAD:master || { echo "::group::Git push debug"; git remote -v; git status; git log --oneline -n 10; echo "::endgroup::"; exit 1; }
