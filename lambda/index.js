@@ -570,24 +570,28 @@ const SimpleResponseIntentHandler = {
   handle(handlerInput) {
     const name = Alexa.getIntentName(handlerInput.requestEnvelope) || '';
     let speakOutput = '';
+    const rb = handlerInput.responseBuilder;
+    const withReprompt = () => rb.reprompt('You can say, play Morning Brew.').getResponse();
     switch (name) {
       case 'AMAZON.HelpIntent':
         speakOutput = 'Say, play Morning Brew, or ask, what did I just miss.';
-        break;
+        return rb.speak(speakOutput).reprompt('You can say, play Morning Brew.').getResponse();
       case 'AMAZON.FallbackIntent':
         speakOutput = 'Sorry, I did not get that. You can say, play Morning Brew.';
-        break;
+        return rb.speak(speakOutput).reprompt('You can say, play Morning Brew.').getResponse();
       case 'AMAZON.StartOverIntent':
-        speakOutput = 'Playing from the start.';
-        break;
+        return (async () => {
+          const state = await getState(handlerInput.attributesManager);
+          if (state.lastUrl && state.lastToken != null) {
+            const directive = buildPlayDirective(state.lastUrl, state.lastToken, 0);
+            return rb.speak('Playing from the start.').addDirective(directive).withShouldEndSession(true).getResponse();
+          }
+          return rb.speak('Nothing to restart yet. Say, play Morning Brew.').reprompt('Say, play Morning Brew.').getResponse();
+        })();
       default:
         speakOutput = 'Only the latest episode is supported.';
-        break;
+        return rb.speak(speakOutput).reprompt('You can say, play Morning Brew.').getResponse();
     }
-    return handlerInput.responseBuilder
-      .speak(speakOutput)
-      .reprompt('You can say, play Morning Brew.')
-      .getResponse();
   }
 };
 
