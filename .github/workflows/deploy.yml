@@ -133,5 +133,10 @@ jobs:
             echo "password=$PASSWORD"
           } | git -c credential.helper="store --file $CRED_FILE" credential-store store
           # Push using only this temporary credential store (override global helper)
-          GIT_TRACE=0 git -c credential.helper= -c credential.helper="store --file $CRED_FILE" push --force alexa HEAD:master
+          if ! GIT_TRACE=0 git -c credential.helper= -c credential.helper="store --file $CRED_FILE" push --force alexa HEAD:master; then
+            # Second-chance: use Authorization header inline without printing secrets
+            BASIC="$(printf "%s:%s" "$USERNAME" "$PASSWORD" | base64 | tr -d '\n')"
+            echo "::add-mask::$BASIC"
+            GIT_TRACE=0 git -c credential.helper= -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" push --force alexa HEAD:master
+          fi
 
