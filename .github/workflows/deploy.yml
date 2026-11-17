@@ -82,7 +82,7 @@ jobs:
 
       - name: Configure Git credential helper for ASK
         run: |
-          git config --global credential.helper '!ask util git-credentials-helper --profile default'
+          git config --global credential.helper '!ask util git-credentials-helper --profile default --hosted-skill-id '"$SKILL_ID"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
