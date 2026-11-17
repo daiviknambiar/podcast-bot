@@ -69,6 +69,11 @@ jobs:
           ask smapi get-skill-status -s "$SKILL_ID" --profile default >/dev/null 2>&1 || { echo "::error title=ASK CLI auth failed::Ensure ASK_REFRESH_TOKEN and ASK_VENDOR_ID are valid for skill $SKILL_ID."; exit 1; }
           echo "ASK connectivity OK."
 
+      - name: Configure Git user
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
       - name: Prepare CI-only branch with Gemini key (not pushed to GitHub)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -95,8 +100,6 @@ jobs:
       - name: Configure Git credential helper for ASK
         run: |
           git config --global credential.helper '!ask util git-credentials-helper --profile default'
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Deploy via ask deploy (hosted)
         id: ask_deploy
