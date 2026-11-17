@@ -111,7 +111,7 @@ jobs:
         if: steps.ask_deploy.outcome == 'failure'
         id: creds
         run: |
-          CREDS_JSON="$(ask smapi generate-credentials-for-alexa-hosted-skill -s "$SKILL_ID" --profile default)"
+          CREDS_JSON="$(ask smapi generate-credentials-for-alexa-hosted-skill -s "$SKILL_ID" --repository-url '${{ steps.hosted.outputs.repo_url }}' --profile default)"
           USERNAME="$(printf "%s" "$CREDS_JSON" | jq -r '..|.username? // .userName? // empty' | head -n1)"
           PASSWORD="$(printf "%s" "$CREDS_JSON" | jq -r '..|.password? // .pass? // empty' | head -n1)"
           if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
