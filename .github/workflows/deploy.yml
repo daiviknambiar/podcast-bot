@@ -108,7 +108,7 @@ jobs:
           ask deploy --ignore-hash --profile default
       
       - name: Generate hosted repo credentials
-        if: false  # disabled in favor of cloning+push approach
+        if: steps.ask_deploy.outcome == 'failure'
         id: creds
         run: |
           CREDS_JSON="$(ask smapi generate-credentials-for-alexa-hosted-skill -s "$SKILL_ID" --repository-url '${{ steps.hosted.outputs.repo_url }}' --repository-type GIT --profile default)"
@@ -118,13 +118,8 @@ jobs:
             echo "::error title=Failed to obtain hosted repo credentials::Could not parse username/password from SMAPI response."
             exit 1
           fi
-          # URL-encode
-          node -e "function enc(s){return encodeURIComponent(s)};console.log('user='+enc(process.env.U));console.log('pass='+enc(process.env.P));" U="$USERNAME" P="$PASSWORD" > encoded.txt
-          USER_ENC="$(grep '^user=' encoded.txt | cut -d= -f2-)"
-          PASS_ENC="$(grep '^pass=' encoded.txt | cut -d= -f2-)"
-          rm -f encoded.txt
-          echo "user_enc=$USER_ENC" >> "$GITHUB_OUTPUT"
-          echo "pass_enc=$PASS_ENC" >> "$GITHUB_OUTPUT"
+          echo "user_raw=$USERNAME" >> "$GITHUB_OUTPUT"
+          echo "pass_raw=$PASSWORD" >> "$GITHUB_OUTPUT"
 
       - name: Clone Alexa Hosted repository
         if: steps.ask_deploy.outcome == 'failure'
@@ -142,6 +137,7 @@ jobs:
         if: steps.ask_deploy.outcome == 'failure'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          REPO_URL: ${{ steps.hosted.outputs.repo_url }}
         run: |
           cd alexa-hosted
           git config user.name "github-actions[bot]"
@@ -152,5 +148,6 @@ jobs:
           fi
           git add skill-package lambda
           git commit -m "ci: deploy from GitHub Actions"
-          git push --force origin HEAD:master
+          BASIC="$(printf "%s:%s" "${{ steps.creds.outputs.user_raw }}" "${{ steps.creds.outputs.pass_raw }}" | base64 | tr -d '\n')"
+          git -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" push --force origin HEAD:master
 
