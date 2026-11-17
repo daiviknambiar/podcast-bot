@@ -136,6 +136,6 @@ jobs:
             echo "username=$USERNAME"
             echo "password=$PASSWORD"
           } | git -c credential.helper="store --file $CRED_FILE" credential-store store
-          # Push using only this temporary credential store
-          GIT_TRACE=0 git -c credential.helper="store --file $CRED_FILE" push --force alexa HEAD:master
+          # Push using only this temporary credential store (override global helper)
+          GIT_TRACE=0 git -c credential.helper= -c credential.helper="store --file $CRED_FILE" push --force alexa HEAD:master
 
