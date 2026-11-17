@@ -127,12 +127,8 @@ jobs:
           echo "::add-mask::$PASSWORD"
           # Build credential-store file scoped to this host/path
           CRED_FILE="$(mktemp)"
-          HOST="$(node -e "const u=new URL(process.argv[1]);process.stdout.write(u.host);" "$REPO_URL")"
-          PATHNAME="$(node -e "const u=new URL(process.argv[1]);process.stdout.write(u.pathname);" "$REPO_URL")"
           {
-            echo "protocol=https"
-            echo "host=$HOST"
-            echo "path=$PATHNAME"
+            echo "url=$REPO_URL"
             echo "username=$USERNAME"
             echo "password=$PASSWORD"
           } | git -c credential.helper="store --file $CRED_FILE" credential-store store
