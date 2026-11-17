@@ -106,6 +106,25 @@ jobs:
         continue-on-error: true
         run: |
           ask deploy --ignore-hash --profile default
+      
+      - name: Generate hosted repo credentials
+        if: steps.ask_deploy.outcome == 'failure'
+        id: creds
+        run: |
+          CREDS_JSON="$(ask smapi generate-credentials-for-alexa-hosted-skill -s "$SKILL_ID" --profile default)"
+          USERNAME="$(printf "%s" "$CREDS_JSON" | jq -r '..|.username? // .userName? // empty' | head -n1)"
+          PASSWORD="$(printf "%s" "$CREDS_JSON" | jq -r '..|.password? // .pass? // empty' | head -n1)"
+          if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
+            echo "::error title=Failed to obtain hosted repo credentials::Could not parse username/password from SMAPI response."
+            exit 1
+          fi
+          # URL-encode
+          node -e "function enc(s){return encodeURIComponent(s)};console.log('user='+enc(process.env.U));console.log('pass='+enc(process.env.P));" U="$USERNAME" P="$PASSWORD" > encoded.txt
+          USER_ENC="$(grep '^user=' encoded.txt | cut -d= -f2-)"
+          PASS_ENC="$(grep '^pass=' encoded.txt | cut -d= -f2-)"
+          rm -f encoded.txt
+          echo "user_enc=$USER_ENC" >> "$GITHUB_OUTPUT"
+          echo "pass_enc=$PASS_ENC" >> "$GITHUB_OUTPUT"
 
       - name: Push to Alexa Hosted repository (master) [fallback]
         if: steps.ask_deploy.outcome == 'failure'
@@ -115,10 +134,11 @@ jobs:
           ASK_PROFILE: default
         run: |
           # Add remote for hosted repo
-          git remote add alexa "$REPO_URL" || git remote set-url alexa "$REPO_URL"
+          AUTH_URL="$(echo "$REPO_URL" | sed "s#https://#https://${{ steps.creds.outputs.user_enc }}:${{ steps.creds.outputs.pass_enc }}@#")"
+          git remote add alexa "$AUTH_URL" || git remote set-url alexa "$AUTH_URL"
           # Force-push current HEAD to hosted master (dev stage)
           set -x
-          git push --force alexa HEAD:master || { echo "::group::Git push debug"; git remote -v; git status; git log --oneline -n 10; echo "::endgroup::"; exit 1; }
+          git push --force alexa HEAD:master || { echo "::error title=Git push failed::Pushing to Alexa hosted repo failed."; exit 1; }
           # Return to the original branch (no changes pushed to GitHub)
           git checkout -
 
