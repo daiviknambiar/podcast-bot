@@ -101,7 +101,7 @@ jobs:
         run: |
           DEP_BRANCH="ci/alexa-deploy-${GITHUB_SHA}"
           git checkout -b "$DEP_BRANCH"
-          node -e "const fs=require('fs');const esc=s=>String(s||'').replace(/'/g,\"\\\\'\");const wall=esc(process.env.PODBOT_WEBHOOK_URL);const wkey=esc(process.env.PODBOT_WEBHOOK_KEY);const g=esc(process.env.GEMINI_API_KEY);const o=esc(process.env.OPENAI_API_KEY);let out='module.exports = {\\n'; if (g) out+=`  GEMINI_API_KEY: '${g}',\\n`; if (o) out+=`  OPENAI_API_KEY: '${o}',\\n`; if (wall) out+=`  PODBOT_WEBHOOK_URL: '${wall}',\\n`; if (wkey) out+=`  PODBOT_WEBHOOK_KEY: '${wkey}',\\n`; out+=`  PODBOT_AUTH_HEADER: 'Authorization'\\n};`; fs.writeFileSync('lambda/gemini-key.js',out);"
+          node -e "const fs=require('fs');const esc=s=>String(s||'').replace(/'/g,\"\\\\'\");const wall=esc(process.env.PODBOT_WEBHOOK_URL);const wkey=esc(process.env.PODBOT_WEBHOOK_KEY);const g=esc(process.env.GEMINI_API_KEY);const o=esc(process.env.OPENAI_API_KEY);let out='module.exports = {\\n'; if (g) out+= '  GEMINI_API_KEY: \\''+g+'\\',\\n'; if (o) out+= '  OPENAI_API_KEY: \\''+o+'\\',\\n'; if (wall) out+= '  PODBOT_WEBHOOK_URL: \\''+wall+'\\',\\n'; if (wkey) out+= '  PODBOT_WEBHOOK_KEY: \\''+wkey+'\\',\\n'; out+= '  PODBOT_AUTH_HEADER: \\''+'Authorization'+'\\'\\n};'; fs.writeFileSync('lambda/gemini-key.js',out);"
           git add -f lambda/gemini-key.js
           git commit -m "ci: add secrets file for hosted deploy (CI-only)"
           # Confirm config file presence (without revealing values)
