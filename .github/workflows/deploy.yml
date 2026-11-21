@@ -137,6 +137,36 @@ jobs:
         run: |
           curl -s -H "Authorization: Bearer $OPENAI_API_KEY" https://api.openai.com/v1/models | jq -r '.data[]?.id' | sort -u | head -n 200
 
+      - name: Auto-set OpenAI primary and fallback (CI-only)
+        if: env.OPENAI_API_KEY != ''
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          LIST="$(curl -s -H "Authorization: Bearer $OPENAI_API_KEY" https://api.openai.com/v1/models | jq -r '.data[]?.id' | sort -u)"
+          choose() { echo "$LIST" | grep -qx "$1"; }
+          PRIMARY=""
+          FALLBACK=""
+          if choose "gpt-4.1-nano"; then PRIMARY="gpt-4.1-nano"; fi
+          if [ -z "$PRIMARY" ] && choose "gpt-4o-mini"; then PRIMARY="gpt-4o-mini"; fi
+          if [ -z "$PRIMARY" ] && choose "gpt-5-nano"; then PRIMARY="gpt-5-nano"; fi
+          if [ -z "$PRIMARY" ] && choose "gpt-5-mini"; then PRIMARY="gpt-5-mini"; fi
+          # fallback = next cheapest present different from PRIMARY
+          for c in gpt-4.1-nano gpt-4o-mini gpt-5-nano gpt-5-mini; do
+            if [ "$c" != "$PRIMARY" ] && echo "$LIST" | grep -qx "$c"; then FALLBACK="$c"; break; fi
+          done
+          if [ -n "$PRIMARY" ]; then
+            sed -i -E "s#OPENAI_MODEL:\\s*'[^']*'#OPENAI_MODEL: '${PRIMARY}'#g" lambda/config.js
+            if grep -q 'OPENAI_FALLBACK_MODELS' lambda/config.js; then
+              if [ -n "$FALLBACK" ]; then
+                sed -i -E "s#OPENAI_FALLBACK_MODELS:\\s*\\[[^\\]]*\\]#OPENAI_FALLBACK_MODELS: ['${FALLBACK}']#g" lambda/config.js
+              fi
+            fi
+            git add lambda/config.js
+            if ! git diff --cached --quiet; then
+              git commit -m "ci: set OpenAI primary to ${PRIMARY}${FALLBACK:+ and fallback to ${FALLBACK}}"
+            fi
+          fi
+
       - name: Probe OpenAI candidate models
         if: env.OPENAI_API_KEY != ''
         env:
