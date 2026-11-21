@@ -3,17 +3,23 @@
 
 const Alexa = require('ask-sdk-core');
 const { S3PersistenceAdapter } = require('ask-sdk-s3-persistence-adapter');
+const { DynamoDbPersistenceAdapter } = require('ask-sdk-dynamodb-persistence-adapter');
+const AWS = require('aws-sdk');
 const https = require('https');
 const { FEED_URL, LOOKBACK_SECONDS, GEMINI_MODEL, ENABLE_GOOGLE_GROUNDING } = require('./config');
 
 let GEMINI_API_KEY = process.env.GEMINI_API_KEY || null;
+let PODBOT_WEBHOOK_URL = process.env.PODBOT_WEBHOOK_URL || null;
+let PODBOT_WEBHOOK_KEY = process.env.PODBOT_WEBHOOK_KEY || null;
+let PODBOT_AUTH_HEADER = process.env.PODBOT_AUTH_HEADER || 'Authorization';
 try {
   // Loaded at deploy-time by the workflow; never committed
   // module.exports = { GEMINI_API_KEY: '...' }
   const localKey = require('./gemini-key.js');
-  if (localKey && localKey.GEMINI_API_KEY) {
-    GEMINI_API_KEY = localKey.GEMINI_API_KEY;
-  }
+  if (localKey && localKey.GEMINI_API_KEY) { GEMINI_API_KEY = localKey.GEMINI_API_KEY; }
+  if (localKey && localKey.PODBOT_WEBHOOK_URL) { PODBOT_WEBHOOK_URL = localKey.PODBOT_WEBHOOK_URL; }
+  if (localKey && localKey.PODBOT_WEBHOOK_KEY) { PODBOT_WEBHOOK_KEY = localKey.PODBOT_WEBHOOK_KEY; }
+  if (localKey && localKey.PODBOT_AUTH_HEADER) { PODBOT_AUTH_HEADER = localKey.PODBOT_AUTH_HEADER; }
 } catch (e) {
   // ignored - file does not exist in repo
 }
@@ -272,13 +278,17 @@ async function callGeminiAnswer({ question, audioBase64, notes, model = GEMINI_M
     `You may use general knowledge to answer accurately.` +
     (notes ? ` Episode notes (may be incomplete): ${notes.slice(0, 1200)}.` : '');
   const parts = [{ text: basePrompt + (question ? ` Question: ${question}` : '') }];
-  if (audioBase64) {
-    parts.push({
-      inlineData: {
-        mimeType: 'audio/mpeg',
-        data: audioBase64
-      }
-    });
+  if (audioBase64 && typeof audioBase64 === 'object' && (audioBase64.recent || audioBase64.upcoming)) {
+    if (audioBase64.recent) {
+      parts.push({ text: 'Recent audio snippet (~last 75 seconds):' });
+      parts.push({ inlineData: { mimeType: 'audio/mpeg', data: audioBase64.recent } });
+    }
+    if (audioBase64.upcoming) {
+      parts.push({ text: 'Upcoming audio snippet (~next 90 seconds):' });
+      parts.push({ inlineData: { mimeType: 'audio/mpeg', data: audioBase64.upcoming } });
+    }
+  } else if (audioBase64) {
+    parts.push({ inlineData: { mimeType: 'audio/mpeg', data: audioBase64 } });
   }
   async function doCall({ withGrounding }) {
     const body = {
@@ -356,13 +366,25 @@ async function sendProgressiveResponse(handlerInput, speech) {
 
 // ---------- Persistence ----------
 function getPersistenceAdapter() {
-  const bucketName = process.env.S3_PERSISTENCE_BUCKET;
-  if (!bucketName) {
-    // The adapter will throw later; we keep going to support local lambda testing
+  const tableName = process.env.DYNAMODB_PERSISTENCE_TABLE_NAME;
+  const region = process.env.DYNAMODB_PERSISTENCE_REGION;
+  if (tableName && region) {
+    const dynamoDBClient = new AWS.DynamoDB({ region });
+    return new DynamoDbPersistenceAdapter({
+      tableName,
+      createTable: false,
+      dynamoDBClient
+    });
   }
-  return new S3PersistenceAdapter({
-    bucketName
-  });
+  const bucketName = process.env.S3_PERSISTENCE_BUCKET;
+  if (bucketName) {
+    return new S3PersistenceAdapter({ bucketName });
+  }
+  return {
+    async getPersistentAttributes() { return {}; },
+    setPersistentAttributes() {},
+    async savePersistentAttributes() {}
+  };
 }
 
 // ---------- Helpers for state ----------
@@ -426,6 +448,12 @@ const PlayPodcastIntentHandler = {
       const meta = await probeMp3Metadata(finalUrl);
       const token = item.guid || item.title || finalUrl;
 
+      // Flush pending batch if switching episodes
+      if (state.lastUrl && state.lastUrl !== finalUrl && Array.isArray(state.questionsPending) && state.questionsPending.length > 0) {
+        await tryPostAndMaybeClear(state, 'episodeChange');
+        await saveState(attributesManager, state);
+      }
+
       const sameEpisode =
         state.lastToken && state.lastToken === token && state.lastUrl === finalUrl;
       const resumeOffset = sameEpisode ? (state.lastOffsetMs || 0) : 0;
@@ -475,7 +503,7 @@ async function handleOpenQuestion(handlerInput, questionFromUser) {
   try {
     let audioBase64 = null;
     if (url) {
-      // Try to include last ~75s snippet for context
+      // Try to include last ~75s snippet for context and ~90s upcoming
       const id3Size = state.id3Size ?? 0;
       const bytesPerSecond = state.bytesPerSecond ?? (await probeMp3Metadata(url)).bytesPerSecond;
       const lookbackMs = (LOOKBACK_SECONDS || 75) * 1000;
@@ -484,7 +512,17 @@ async function handleOpenQuestion(handlerInput, questionFromUser) {
       const endByte = startByte + Math.max(2048, Math.floor((lookbackMs / 1000) * bytesPerSecond)) - 1;
       const rangeBuf = await fetchMp3Range(url, startByte, endByte);
       const trimmed = trimToFrameSync(rangeBuf);
-      audioBase64 = trimmed.toString('base64');
+      const recentB64 = trimmed.toString('base64');
+      let upcomingB64 = null;
+      try {
+        const aheadSeconds = 90;
+        const startByte2 = id3Size + Math.max(0, Math.floor(((offsetMs || 0) / 1000) * bytesPerSecond));
+        const endByte2 = startByte2 + Math.max(2048, Math.floor(aheadSeconds * bytesPerSecond)) - 1;
+        const futureBuf = await fetchMp3Range(url, startByte2, endByte2);
+        const futureTrim = trimToFrameSync(futureBuf);
+        upcomingB64 = futureTrim.toString('base64');
+      } catch {}
+      audioBase64 = { recent: recentB64, upcoming: upcomingB64 };
     }
     answer = await callGeminiAnswer({
       question: questionFromUser || '',
@@ -496,9 +534,29 @@ async function handleOpenQuestion(handlerInput, questionFromUser) {
     answer = 'Sorry, I could not analyze that just now.';
   }
 
-  const rb = handlerInput.responseBuilder.speak(
-    wasPlaying ? `${answer} Say resume to continue.` : answer
-  );
+  // Log question and confirm once
+  try {
+    const persisted = await getState(attributesManager);
+    const list = Array.isArray(persisted.questionsPending) ? persisted.questionsPending : [];
+    const mmss = formatMmSs(offsetMs || 0);
+    list.push({
+      question: (questionFromUser || '').toString(),
+      timestamp: mmss,
+      alexaAnswer: answer,
+      episodeTitle: persisted.lastTitle || '',
+      episodeUrl: persisted.lastUrl || ''
+    });
+    persisted.questionsPending = list;
+    if (!persisted.questionConfirmSpoken) {
+      answer = `${answer} I'll send a deeper recap of your questions when the episode's done.`;
+      persisted.questionConfirmSpoken = true;
+    }
+    await saveState(attributesManager, persisted);
+  } catch (e) {
+    console.error('Question log error:', e);
+  }
+
+  const rb = handlerInput.responseBuilder.speak(wasPlaying ? `${answer} Say resume to continue.` : answer);
   if (wasPlaying) {
     rb.reprompt('Say resume to continue.');
   } else {
@@ -539,7 +597,16 @@ const PauseIntentHandler = {
     const name = Alexa.getIntentName(handlerInput.requestEnvelope) || '';
     return type === 'IntentRequest' && (name === 'AMAZON.PauseIntent' || name === 'AMAZON.StopIntent' || name === 'AMAZON.CancelIntent');
   },
-  handle(handlerInput) {
+  async handle(handlerInput) {
+    try {
+      const state = await getState(handlerInput.attributesManager);
+      if (Array.isArray(state.questionsPending) && state.questionsPending.length > 0) {
+        await tryPostAndMaybeClear(state, 'stop');
+        await saveState(handlerInput.attributesManager, state);
+      }
+    } catch (e) {
+      console.error('Flush on stop error:', e);
+    }
     return handlerInput.responseBuilder
       .addAudioPlayerStopDirective()
       .withShouldEndSession(true)
@@ -668,6 +735,14 @@ const PlaybackFinishedHandler = {
     const state = await getState(handlerInput.attributesManager);
     // Clear offset on finish
     state.lastOffsetMs = 0;
+    // Flush pending questions
+    try {
+      if (Array.isArray(state.questionsPending) && state.questionsPending.length > 0) {
+        await tryPostAndMaybeClear(state, 'finished');
+      }
+    } catch (e) {
+      console.error('Flush on finish error:', e);
+    }
     await saveState(handlerInput.attributesManager, state);
     return handlerInput.responseBuilder.getResponse();
   }
@@ -757,4 +832,48 @@ exports.handler = skillBuilder
   )
   .addErrorHandlers(ErrorHandler)
   .lambda();
+
+// ---------- Webhook + utilities ----------
+function formatMmSs(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+async function tryPostAndMaybeClear(state, reason) {
+  if (!PODBOT_WEBHOOK_URL || !PODBOT_WEBHOOK_KEY) return;
+  const batch = {
+    episodeTitle: state.lastTitle || '',
+    episodeUrl: state.lastUrl || '',
+    finishedAt: new Date().toISOString(),
+    reason,
+    questions: Array.isArray(state.questionsPending) ? state.questionsPending : []
+  };
+  if (!batch.questions || batch.questions.length === 0) return;
+  const body = Buffer.from(JSON.stringify(batch));
+  const u = new URL(PODBOT_WEBHOOK_URL);
+  const options = {
+    protocol: u.protocol,
+    hostname: u.hostname,
+    port: u.port || (u.protocol === 'https:' ? 443 : 80),
+    path: u.pathname + (u.search || ''),
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      [PODBOT_AUTH_HEADER]: PODBOT_WEBHOOK_KEY,
+      'Content-Length': body.length
+    }
+  };
+  try {
+    const res = await httpRequest(options, body, { timeoutMs: 2500, maxRedirects: 0 });
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      state.questionsPending = [];
+    } else {
+      console.error('Webhook HTTP error:', res.statusCode);
+    }
+  } catch (e) {
+    console.error('Webhook post failed:', e.message || e);
+  }
+}
 

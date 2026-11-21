@@ -13,6 +13,8 @@ jobs:
       ASK_REFRESH_TOKEN: ${{ secrets.ASK_REFRESH_TOKEN }}
       ASK_VENDOR_ID: ${{ secrets.ASK_VENDOR_ID }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      PODBOT_WEBHOOK_URL: ${{ secrets.PODBOT_WEBHOOK_URL }}
+      PODBOT_WEBHOOK_KEY: ${{ secrets.PODBOT_WEBHOOK_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -77,11 +79,13 @@ jobs:
       - name: Prepare CI-only branch with Gemini key (not pushed to GitHub)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PODBOT_WEBHOOK_URL: ${{ secrets.PODBOT_WEBHOOK_URL }}
+          PODBOT_WEBHOOK_KEY: ${{ secrets.PODBOT_WEBHOOK_KEY }}
         run: |
           DEP_BRANCH="ci/alexa-deploy-${GITHUB_SHA}"
           git checkout -b "$DEP_BRANCH"
           if [ -n "$GEMINI_API_KEY" ]; then
-            node -e "const fs=require('fs');const k=process.env.GEMINI_API_KEY||'';const v='module.exports = { GEMINI_API_KEY: \\''+k.replace(/'/g,\"\\\\'\")+'\\' };';fs.writeFileSync('lambda/gemini-key.js',v);"
+            node -e "const fs=require('fs');const k=process.env.GEMINI_API_KEY||'';const wurl=process.env.PODBOT_WEBHOOK_URL||'';const wkey=process.env.PODBOT_WEBHOOK_KEY||'';const esc=s=>s.replace(/'/g,\"\\\\'\");let out='module.exports = {\\n  GEMINI_API_KEY: \\''+esc(k)+'\\'';if(wurl) out+=',\\n  PODBOT_WEBHOOK_URL: \\''+esc(wurl)+'\\'';if(wkey) out+=',\\n  PODBOT_WEBHOOK_KEY: \\''+esc(wkey)+'\\'';out+=',\\n  PODBOT_AUTH_HEADER: \\''+'Authorization'+'\\'\\n};';fs.writeFileSync('lambda/gemini-key.js',out);"
             git add -f lambda/gemini-key.js
             git commit -m "ci: add gemini key for hosted deploy (CI-only)"
           fi
