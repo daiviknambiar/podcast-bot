@@ -6,7 +6,7 @@ const { S3PersistenceAdapter } = require('ask-sdk-s3-persistence-adapter');
 const { DynamoDbPersistenceAdapter } = require('ask-sdk-dynamodb-persistence-adapter');
 const AWS = require('aws-sdk');
 const https = require('https');
-const { FEED_URL, LOOKBACK_SECONDS, GEMINI_MODEL, ENABLE_GOOGLE_GROUNDING } = require('./config');
+const { FEED_URL, LOOKBACK_SECONDS, GEMINI_MODEL, ENABLE_GOOGLE_GROUNDING, GEMINI_FALLBACK_MODELS } = require('./config');
 
 let GEMINI_API_KEY = process.env.GEMINI_API_KEY || null;
 let PODBOT_WEBHOOK_URL = process.env.PODBOT_WEBHOOK_URL || null;
@@ -265,12 +265,17 @@ function trimToFrameSync(buf) {
   return buf;
 }
 
+function normalizeModelName(name) {
+  if (!name) return '';
+  return name.startsWith('models/') ? name.slice('models/'.length) : name;
+}
+
 async function callGeminiAnswer({ question, audioBase64, notes, model = GEMINI_MODEL }) {
   if (!GEMINI_API_KEY) {
     throw new Error('Missing GEMINI_API_KEY (env or lambda/gemini-key.js)');
   }
   const host = 'generativelanguage.googleapis.com';
-  const path = `/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+  const pathFor = (m) => `/v1beta/models/${encodeURIComponent(normalizeModelName(m))}:generateContent`;
   const basePrompt =
     `You are PodBot, an assistant that answers spoken questions clearly. ` +
     `Answer briefly in 2–4 spoken sentences, no markdown. ` +
@@ -290,7 +295,7 @@ async function callGeminiAnswer({ question, audioBase64, notes, model = GEMINI_M
   } else if (audioBase64) {
     parts.push({ inlineData: { mimeType: 'audio/mpeg', data: audioBase64 } });
   }
-  async function doCall({ withGrounding }) {
+  async function doCall({ withGrounding, useModel = model }) {
     const body = {
       contents: [{ role: 'user', parts }],
       generationConfig: {
@@ -307,7 +312,7 @@ async function callGeminiAnswer({ question, audioBase64, notes, model = GEMINI_M
       protocol: 'https:',
       hostname: host,
       port: 443,
-      path,
+      path: pathFor(useModel),
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -318,38 +323,23 @@ async function callGeminiAnswer({ question, audioBase64, notes, model = GEMINI_M
     const res = await httpRequest(options, Buffer.from(payload), { timeoutMs: 6000, maxRedirects: 0 });
     return res;
   }
-  // Attempt 1: with grounding (if enabled)
-  let res = await doCall({ withGrounding: !!ENABLE_GOOGLE_GROUNDING });
+  // Attempt 1: with grounding (if enabled) on primary model
+  let res = await doCall({ withGrounding: !!ENABLE_GOOGLE_GROUNDING, useModel: model });
   // On 4xx, try without grounding
   if (res.statusCode >= 400 && res.statusCode < 500) {
     const bodyTxt = (res.body || Buffer.from('')).toString('utf8').slice(0, 600);
     console.error('Gemini 4xx', { status: res.statusCode, body: bodyTxt });
-    res = await doCall({ withGrounding: false });
+    res = await doCall({ withGrounding: false, useModel: model });
   }
   // On 4xx again, try a lighter fallback model
   if (res.statusCode >= 400 && res.statusCode < 500) {
     const bodyTxt2 = (res.body || Buffer.from('')).toString('utf8').slice(0, 600);
     console.error('Gemini fallback 4xx', { status: res.statusCode, body: bodyTxt2 });
-    // Fallback free-tier friendly model
-    const fallbackModel = 'gemini-2.0-flash';
-    const path2 = `/v1beta/models/${encodeURIComponent(fallbackModel)}:generateContent`;
-    const payload2 = JSON.stringify({
-      contents: [{ role: 'user', parts }],
-      generationConfig: { temperature: 0.3, maxOutputTokens: 220 }
-    });
-    const options2 = {
-      protocol: 'https:',
-      hostname: host,
-      port: 443,
-      path: path2,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(payload2),
-        'x-goog-api-key': GEMINI_API_KEY
-      }
-    };
-    res = await httpRequest(options2, Buffer.from(payload2), { timeoutMs: 6000, maxRedirects: 0 });
+    const fallbacks = Array.isArray(GEMINI_FALLBACK_MODELS) && GEMINI_FALLBACK_MODELS.length
+      ? GEMINI_FALLBACK_MODELS
+      : ['models/gemini-3.8-flash-lite', 'models/gemini-3.8-mini'];
+    const fbModel = fallbacks[0];
+    res = await doCall({ withGrounding: false, useModel: fbModel });
   }
   if (res.statusCode < 200 || res.statusCode >= 300) {
     const bodyTxt3 = (res.body || Buffer.from('')).toString('utf8').slice(0, 600);

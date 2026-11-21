@@ -114,6 +114,44 @@ jobs:
             echo "gemini-key.js: missing"
           fi
 
+      - name: List Gemini models supporting generateContent
+        id: gemini_models
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "GEMINI_API_KEY not set; skipping model list."
+            exit 0
+          fi
+          MODELS_JSON="$(curl -s -H "x-goog-api-key: $GEMINI_API_KEY" "https://generativelanguage.googleapis.com/v1beta/models" || true)"
+          if [ -z "$MODELS_JSON" ]; then
+            echo "Could not retrieve models list."
+            exit 0
+          fi
+          echo "Available models (generateContent):"
+          echo "$MODELS_JSON" | jq -r '.models[]? | select((.supportedGenerationMethods // []) | index("generateContent")) | .name' | sort -u
+
+      - name: Auto-set Gemini model and fallbacks (CI-only)
+        if: env.GEMINI_API_KEY != ''
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          MODELS_JSON="$(curl -s -H "x-goog-api-key: $GEMINI_API_KEY" "https://generativelanguage.googleapis.com/v1beta/models" || true)"
+          LIST="$(echo "$MODELS_JSON" | jq -r '.models[]? | select((.supportedGenerationMethods // []) | index("generateContent")) | .name' | sort -u)"
+          PRIMARY="models/gemini-3.8-flash"
+          if ! echo "$LIST" | grep -qx "$PRIMARY"; then
+            echo "Preferred primary $PRIMARY not in list; leaving config as is."
+            PRIMARY=""
+          fi
+          FALLBACK="$(echo "$LIST" | grep -E -m1 '^models/gemini-3\.8-(flash-lite|mini)(|-.+)?$' || true)"
+          if [ -n "$PRIMARY" ]; then
+            node -e "const fs=require('fs');let t=fs.readFileSync('lambda/config.js','utf8');t=t.replace(/GEMINI_MODEL:\\s*'[^']*'/,'GEMINI_MODEL: \\''+$PRIMARY+'\\'');if(t.includes('GEMINI_FALLBACK_MODELS')){t=t.replace(/GEMINI_FALLBACK_MODELS:\\s*\\[[^\\]]*\\]/,'GEMINI_FALLBACK_MODELS: ['+(process.env.FALLBACK?('\\''+process.env.FALLBACK+'\\''):'')+']');}else{t=t.replace(/}\\s*;\\s*$/,(process.env.FALLBACK?`,\\n  GEMINI_FALLBACK_MODELS: ['`+process.env.FALLBACK+`']\\n};`:'\\n};'));}fs.writeFileSync('lambda/config.js',t);" 
+            git add lambda/config.js
+            if ! git diff --cached --quiet; then
+              git commit -m "ci: set Gemini primary to $PRIMARY and fallback to ${FALLBACK:-<none>}"
+            fi
+          fi
+
       - name: Resolve Alexa Hosted repository URL
         id: hosted
         run: |
@@ -284,13 +322,13 @@ jobs:
       - name: Simulate skill (open)
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
         run: |
-          SIM_JSON="$(ask smapi simulate-skill -s "$SKILL_ID" --stage development --locale en-US --input 'open pod bot' --profile default || true)"
+          SIM_JSON="$(ask smapi simulate-skill -s "$SKILL_ID" --stage development --locale en-US --input-content 'open pod bot' --profile default || true)"
           echo "$SIM_JSON" | jq -r '.'
 
       - name: Simulate skill (Q&A)
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
         run: |
-          SIM_JSON="$(ask smapi simulate-skill -s "$SKILL_ID" --stage development --locale en-US --input 'ask pod bot what is a webhook' --profile default || true)"
+          SIM_JSON="$(ask smapi simulate-skill -s "$SKILL_ID" --stage development --locale en-US --input-content 'ask pod bot what is a webhook' --profile default || true)"
           echo "$SIM_JSON" | jq -r '.'
 
       - name: Report CodeCommit dev HEAD
