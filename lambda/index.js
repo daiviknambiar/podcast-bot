@@ -803,7 +803,7 @@ const ErrorHandler = {
   handle(handlerInput, error) {
     console.error('Error handled:', error);
     return handlerInput.responseBuilder
-      .speak('Sorry, something went wrong.')
+      .speak('Sorry, something went wrong in PodBot. Please try again.')
       .reprompt('You can say, play Morning Brew.')
       .getResponse();
   }

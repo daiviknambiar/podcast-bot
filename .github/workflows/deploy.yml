@@ -136,7 +136,11 @@ jobs:
           REPO_URL: ${{ steps.hosted.outputs.repo_url }}
         run: |
           git remote add alexa "$REPO_URL" || git remote set-url alexa "$REPO_URL"
+          set -e
+          echo "Pushing to CodeCommit master..."
           GIT_TRACE=0 git push --force alexa HEAD:master
+          echo "Pushing to CodeCommit dev..."
+          GIT_TRACE=0 git push --force alexa HEAD:dev
 
       - name: Fallback push via credential-store
         id: push_fallback
@@ -167,6 +171,12 @@ jobs:
             BASIC="$(printf "%s:%s" "$USERNAME" "$PASSWORD" | base64 | tr -d '\n')"
             echo "::add-mask::$BASIC"
             GIT_TRACE=0 git -c credential.helper= -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" push --force alexa HEAD:master
+          fi
+          # Always push dev as well
+          if ! GIT_TRACE=0 git -c credential.helper= -c credential.helper="store --file $CRED_FILE" push --force alexa HEAD:dev; then
+            BASIC="$(printf "%s:%s" "$USERNAME" "$PASSWORD" | base64 | tr -d '\n')"
+            echo "::add-mask::$BASIC"
+            GIT_TRACE=0 git -c credential.helper= -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" push --force alexa HEAD:dev
           fi
 
       - name: Update manifest via SMAPI (development)
@@ -229,6 +239,10 @@ jobs:
             n=$((n+1))
             sleep 5
           done
+          if [ "$HS" != "SUCCEEDED" ]; then
+            echo "::error title=Hosted deployment timeout::No SUCCEEDED within timeout."
+            exit 1
+          fi
 
       - name: List vendor skills and invocations (dev)
         run: |
