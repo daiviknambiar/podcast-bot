@@ -183,24 +183,42 @@ jobs:
         if: always()
         env:
           REPO_URL: ${{ steps.hosted.outputs.repo_url }}
+          PODBOT_WEBHOOK_URL: ${{ secrets.PODBOT_WEBHOOK_URL }}
+          PODBOT_WEBHOOK_KEY: ${{ secrets.PODBOT_WEBHOOK_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           CREDS_JSON="$(ask smapi generate-credentials-for-alexa-hosted-skill -s "$SKILL_ID" --repository-url "$REPO_URL" --repository-type GIT --profile default)"
           USERNAME="$(printf "%s" "$CREDS_JSON" | jq -r '..|.username? // .userName? // empty' | head -n1)"
           PASSWORD="$(printf "%s" "$CREDS_JSON" | jq -r '..|.password? // .pass? // empty' | head -n1)"
           echo "::add-mask::$USERNAME"
           echo "::add-mask::$PASSWORD"
-          AUTH_URL="$(echo "$REPO_URL" | sed "s#https://#https://${USERNAME}:${PASSWORD}@#")"
-          rm -rf alexa-dev && git clone "$AUTH_URL" alexa-dev
+          CRED_FILE="$(mktemp)"
+          {
+            echo "url=$REPO_URL"
+            echo "username=$USERNAME"
+            echo "password=$PASSWORD"
+          } | git -c credential.helper="store --file $CRED_FILE" credential-store store
+          rm -rf alexa-dev
+          git -c credential.helper="store --file $CRED_FILE" clone "$REPO_URL" alexa-dev
           cd alexa-dev
+          git -c credential.helper="store --file $CRED_FILE" fetch origin
           git checkout dev || git checkout -b dev origin/dev
+          # Merge origin/master into dev to create a new commit (instead of ref force-only)
+          git -c credential.helper="store --file $CRED_FILE" merge --no-ff origin/master -m "ci: merge master into dev for hosted deploy" || true
+          # Mirror latest files
           rsync -a --delete ../skill-package/ skill-package/
           rsync -a --delete ../lambda/ lambda/
+          # Write CI-only gemini/webhook key into CodeCommit dev (forced add)
+          if [ -n "$GEMINI_API_KEY" ]; then
+            node -e "const fs=require('fs');const k=process.env.GEMINI_API_KEY||'';const wurl=process.env.PODBOT_WEBHOOK_URL||'';const wkey=process.env.PODBOT_WEBHOOK_KEY||'';const esc=s=>s.replace(/'/g,\"\\\\'\");let out='module.exports = {\\n  GEMINI_API_KEY: \\''+esc(k)+'\\'';if(wurl) out+=',\\n  PODBOT_WEBHOOK_URL: \\''+esc(wurl)+'\\'';if(wkey) out+=',\\n  PODBOT_WEBHOOK_KEY: \\''+esc(wkey)+'\\'';out+=',\\n  PODBOT_AUTH_HEADER: \\''+'Authorization'+'\\'\\n};';fs.writeFileSync('lambda/gemini-key.js',out);"
+            git add -f lambda/gemini-key.js
+          fi
           git add skill-package lambda
           if git diff --cached --quiet; then
             echo "No changes to commit on dev."
           else
             git commit -m "ci: mirror repo to dev for hosted deploy"
-            git push origin dev
+            git -c credential.helper="store --file $CRED_FILE" push origin dev
           fi
 
       - name: Update manifest via SMAPI (development)
