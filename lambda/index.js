@@ -318,12 +318,42 @@ async function callGeminiAnswer({ question, audioBase64, notes, model = GEMINI_M
     const res = await httpRequest(options, Buffer.from(payload), { timeoutMs: 6000, maxRedirects: 0 });
     return res;
   }
+  // Attempt 1: with grounding (if enabled)
   let res = await doCall({ withGrounding: !!ENABLE_GOOGLE_GROUNDING });
-  if (res.statusCode === 400 && ENABLE_GOOGLE_GROUNDING) {
-    // Retry once without grounding if the model rejects tools
+  // On 4xx, try without grounding
+  if (res.statusCode >= 400 && res.statusCode < 500) {
+    const bodyTxt = (res.body || Buffer.from('')).toString('utf8').slice(0, 600);
+    console.error('Gemini 4xx', { status: res.statusCode, body: bodyTxt });
     res = await doCall({ withGrounding: false });
   }
+  // On 4xx again, try a lighter fallback model
+  if (res.statusCode >= 400 && res.statusCode < 500) {
+    const bodyTxt2 = (res.body || Buffer.from('')).toString('utf8').slice(0, 600);
+    console.error('Gemini fallback 4xx', { status: res.statusCode, body: bodyTxt2 });
+    // Fallback free-tier friendly model
+    const fallbackModel = 'gemini-2.0-flash';
+    const path2 = `/v1beta/models/${encodeURIComponent(fallbackModel)}:generateContent`;
+    const payload2 = JSON.stringify({
+      contents: [{ role: 'user', parts }],
+      generationConfig: { temperature: 0.3, maxOutputTokens: 220 }
+    });
+    const options2 = {
+      protocol: 'https:',
+      hostname: host,
+      port: 443,
+      path: path2,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload2),
+        'x-goog-api-key': GEMINI_API_KEY
+      }
+    };
+    res = await httpRequest(options2, Buffer.from(payload2), { timeoutMs: 6000, maxRedirects: 0 });
+  }
   if (res.statusCode < 200 || res.statusCode >= 300) {
+    const bodyTxt3 = (res.body || Buffer.from('')).toString('utf8').slice(0, 600);
+    console.error('Gemini error (final)', { status: res.statusCode, body: bodyTxt3 });
     throw new Error(`Gemini HTTP ${res.statusCode}`);
   }
   const data = JSON.parse(res.body.toString('utf8'));

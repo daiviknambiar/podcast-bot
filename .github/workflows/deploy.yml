@@ -179,6 +179,30 @@ jobs:
             GIT_TRACE=0 git -c credential.helper= -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" push --force alexa HEAD:dev
           fi
 
+      - name: Ensure CodeCommit dev has a new commit (mirror files)
+        if: always()
+        env:
+          REPO_URL: ${{ steps.hosted.outputs.repo_url }}
+        run: |
+          CREDS_JSON="$(ask smapi generate-credentials-for-alexa-hosted-skill -s "$SKILL_ID" --repository-url "$REPO_URL" --repository-type GIT --profile default)"
+          USERNAME="$(printf "%s" "$CREDS_JSON" | jq -r '..|.username? // .userName? // empty' | head -n1)"
+          PASSWORD="$(printf "%s" "$CREDS_JSON" | jq -r '..|.password? // .pass? // empty' | head -n1)"
+          echo "::add-mask::$USERNAME"
+          echo "::add-mask::$PASSWORD"
+          AUTH_URL="$(echo "$REPO_URL" | sed "s#https://#https://${USERNAME}:${PASSWORD}@#")"
+          rm -rf alexa-dev && git clone "$AUTH_URL" alexa-dev
+          cd alexa-dev
+          git checkout dev || git checkout -b dev origin/dev
+          rsync -a --delete ../skill-package/ skill-package/
+          rsync -a --delete ../lambda/ lambda/
+          git add skill-package lambda
+          if git diff --cached --quiet; then
+            echo "No changes to commit on dev."
+          else
+            git commit -m "ci: mirror repo to dev for hosted deploy"
+            git push origin dev
+          fi
+
       - name: Update manifest via SMAPI (development)
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
         continue-on-error: true
