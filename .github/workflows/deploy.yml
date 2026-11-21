@@ -143,6 +143,7 @@ jobs:
 
       - name: Update manifest via SMAPI (development)
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
+        continue-on-error: true
         run: |
           ask smapi update-skill-manifest -s "$SKILL_ID" --stage development --manifest file:skill-package/skill.json --profile default
 

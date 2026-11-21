@@ -5,11 +5,16 @@
         "en-US": {
           "name": "PodBot",
           "summary": "Plays the latest Morning Brew Daily and answers what-you-just-heard.",
-          "description": "Podcast Bot plays the newest Morning Brew Daily episode and can answer questions about what was just said by analyzing the last ~75 seconds of audio with Gemini."
+          "description": "PodBot plays the newest Morning Brew Daily episode and can answer questions about what was just said by analyzing the last ~75 seconds of audio with Gemini.",
+          "examplePhrases": [
+            "Alexa, ask pod bot to play Morning Brew",
+            "Alexa, ask pod bot what is compute",
+            "Alexa, ask pod bot what did I just miss"
+          ]
         }
       },
       "isAvailableWorldwide": true,
-      "testingInstructions": "Try: 'Alexa, ask Podcast Bot to play Morning Brew', then 'what did I just miss?'.",
+      "testingInstructions": "Try: 'Alexa, ask pod bot to play Morning Brew', then 'what did I just miss?'.",
       "category": "NEWS"
     },
     "apis": {
