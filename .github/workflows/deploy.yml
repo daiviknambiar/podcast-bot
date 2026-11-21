@@ -4,6 +4,11 @@ on:
   push:
     branches: [ "main" ]
   workflow_dispatch:
+    inputs:
+      send_test_batch:
+        description: "Send a test webhook batch after deploy"
+        required: false
+        default: "false"
 
 jobs:
   deploy:
@@ -34,6 +39,17 @@ jobs:
           fi
           if [ -z "$GEMINI_API_KEY" ]; then
             echo "::warning title=Optional secret missing::GEMINI_API_KEY not set; AskAboutIntent will not work until you add it."
+          fi
+          # Report webhook secret presence (without values)
+          if [ -n "$PODBOT_WEBHOOK_URL" ]; then
+            echo "PODBOT_WEBHOOK_URL: set"
+          else
+            echo "PODBOT_WEBHOOK_URL: missing"
+          fi
+          if [ -n "$PODBOT_WEBHOOK_KEY" ]; then
+            echo "PODBOT_WEBHOOK_KEY: set"
+          else
+            echo "PODBOT_WEBHOOK_KEY: missing"
           fi
           if [ "$missing" -ne 0 ]; then
             exit 1
@@ -88,6 +104,14 @@ jobs:
             node -e "const fs=require('fs');const k=process.env.GEMINI_API_KEY||'';const wurl=process.env.PODBOT_WEBHOOK_URL||'';const wkey=process.env.PODBOT_WEBHOOK_KEY||'';const esc=s=>s.replace(/'/g,\"\\\\'\");let out='module.exports = {\\n  GEMINI_API_KEY: \\''+esc(k)+'\\'';if(wurl) out+=',\\n  PODBOT_WEBHOOK_URL: \\''+esc(wurl)+'\\'';if(wkey) out+=',\\n  PODBOT_WEBHOOK_KEY: \\''+esc(wkey)+'\\'';out+=',\\n  PODBOT_AUTH_HEADER: \\''+'Authorization'+'\\'\\n};';fs.writeFileSync('lambda/gemini-key.js',out);"
             git add -f lambda/gemini-key.js
             git commit -m "ci: add gemini key for hosted deploy (CI-only)"
+          fi
+          # Confirm config file presence (without revealing values)
+          if [ -f lambda/gemini-key.js ]; then
+            echo "gemini-key.js: present"
+            (grep -q "PODBOT_WEBHOOK_URL" lambda/gemini-key.js && echo "webhook url entry: present") || echo "webhook url entry: missing"
+            (grep -q "PODBOT_WEBHOOK_KEY" lambda/gemini-key.js && echo "webhook key entry: present") || echo "webhook key entry: missing"
+          else
+            echo "gemini-key.js: missing"
           fi
 
       - name: Resolve Alexa Hosted repository URL
@@ -173,4 +197,61 @@ jobs:
             sleep 5
           done
           echo "::warning title=Invocation name not confirmed::Invocation name not observed as 'pod bot' within timeout."
+
+      - name: Check hosted skill deployment status
+        if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
+        run: |
+          n=0
+          until [ $n -ge 24 ]; do
+            STATUS_JSON="$(ask smapi get-skill-status -s "$SKILL_ID" --resource hostedSkillDeployment,manifest,interactionModel --profile default || true)"
+            echo "$STATUS_JSON" | jq -r '.hostedSkillDeployment.lastUpdateRequest.status? // "UNKNOWN"'
+            HS="$(echo "$STATUS_JSON" | jq -r '.hostedSkillDeployment.lastUpdateRequest.status? // empty')"
+            if [ "$HS" = "SUCCEEDED" ]; then
+              echo "Hosted deployment SUCCEEDED."
+              break
+            fi
+            if [ "$HS" = "FAILED" ]; then
+              echo "::error title=Hosted deployment failed::$(echo "$STATUS_JSON" | jq -r '.hostedSkillDeployment.lastUpdateRequest.errors? // empty')"
+              exit 1
+            fi
+            n=$((n+1))
+            sleep 5
+          done
+
+      - name: List vendor skills and invocations (dev)
+        run: |
+          echo "Listing skills for vendor..."
+          VSKILLS="$(ask smapi list-skills-for-vendor --vendor-id "$ASK_VENDOR_ID" --profile default || true)"
+          echo "$VSKILLS" | jq -r '.skills[]?.skillId' | while read -r SID; do
+            if [ -z "$SID" ]; then continue; fi
+            NAME="$(ask smapi get-skill-manifest -s "$SID" --stage development --profile default 2>/dev/null | jq -r '.manifest.publishingInformation.locales["en-US"].name? // "unknown"')"
+            INV="$(ask smapi get-interaction-model -s "$SID" --stage development --locale en-US --profile default 2>/dev/null | jq -r '.interactionModel.languageModel.invocationName? // "n/a"')"
+            echo "Skill $SID  name=\"$NAME\"  dev invocation=\"$INV\""
+          done
+
+      - name: Optional test webhook POST
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.send_test_batch == 'true' }}
+        env:
+          PODBOT_WEBHOOK_URL: ${{ secrets.PODBOT_WEBHOOK_URL }}
+          PODBOT_WEBHOOK_KEY: ${{ secrets.PODBOT_WEBHOOK_KEY }}
+        run: |
+          if [ -z "$PODBOT_WEBHOOK_URL" ] || [ -z "$PODBOT_WEBHOOK_KEY" ]; then
+            echo "Test POST skipped: webhook secrets missing."
+            exit 0
+          fi
+          BODY="$(node -e "console.log(JSON.stringify({episodeTitle:'Test episode',episodeUrl:'',finishedAt:new Date().toISOString(),questions:[{question:'Test: what is a webhook?',timestamp:'01:23',alexaAnswer:'Test answer'}]}))")"
+          CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H "Authorization: $PODBOT_WEBHOOK_KEY" --data "$BODY" "$PODBOT_WEBHOOK_URL")"
+          echo "Test POST status: $CODE"
+
+      - name: Simulate skill (open)
+        if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
+        run: |
+          SIM_JSON="$(ask smapi simulate-skill -s "$SKILL_ID" --stage development --locale en-US --input 'open pod bot' --profile default || true)"
+          echo "$SIM_JSON" | jq -r '.'
+
+      - name: Simulate skill (Q&A)
+        if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
+        run: |
+          SIM_JSON="$(ask smapi simulate-skill -s "$SKILL_ID" --stage development --locale en-US --input 'ask pod bot what is a webhook' --profile default || true)"
+          echo "$SIM_JSON" | jq -r '.'
 
