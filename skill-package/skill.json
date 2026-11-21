@@ -20,11 +20,20 @@
     "apis": {
       "custom": {}
     },
+    "privacyAndCompliance": {
+      "locales": {
+        "en-US": {
+          "privacyPolicyUrl": "https://example.com/privacy"
+        }
+      },
+      "allowsPurchases": false,
+      "usesPersonalInfo": false,
+      "isChildDirected": false,
+      "isExportCompliant": true,
+      "containsAds": false
+    },
     "manifestVersion": "1.0",
     "permissions": [],
-    "events": {
-      "endpoint": {}
-    },
     "interfaces": [
       {
         "type": "AUDIO_PLAYER"
