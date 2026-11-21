@@ -3,7 +3,7 @@
     "publishingInformation": {
       "locales": {
         "en-US": {
-          "name": "Podcast Bot",
+          "name": "PodBot",
           "summary": "Plays the latest Morning Brew Daily and answers what-you-just-heard.",
           "description": "Podcast Bot plays the newest Morning Brew Daily episode and can answer questions about what was just said by analyzing the last ~75 seconds of audio with Gemini."
         }

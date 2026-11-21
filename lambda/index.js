@@ -4,7 +4,7 @@
 const Alexa = require('ask-sdk-core');
 const { S3PersistenceAdapter } = require('ask-sdk-s3-persistence-adapter');
 const https = require('https');
-const { FEED_URL, LOOKBACK_SECONDS, GEMINI_MODEL } = require('./config');
+const { FEED_URL, LOOKBACK_SECONDS, GEMINI_MODEL, ENABLE_GOOGLE_GROUNDING } = require('./config');
 
 let GEMINI_API_KEY = process.env.GEMINI_API_KEY || null;
 try {
@@ -259,57 +259,66 @@ function trimToFrameSync(buf) {
   return buf;
 }
 
-async function callGeminiSummarize({ audioBase64, topic, notes, model = GEMINI_MODEL }) {
+async function callGeminiAnswer({ question, audioBase64, notes, model = GEMINI_MODEL }) {
   if (!GEMINI_API_KEY) {
     throw new Error('Missing GEMINI_API_KEY (env or lambda/gemini-key.js)');
   }
   const host = 'generativelanguage.googleapis.com';
   const path = `/v1beta/models/${encodeURIComponent(model)}:generateContent`;
-  const promptText =
-    `You are an assistant helping summarize what was just said in a podcast. ` +
-    `Answer the user's question in 2–3 concise spoken sentences. ` +
-    (topic ? `Focus on the topic: "${topic}". ` : '') +
-    (notes ? `Episode notes (context, may be incomplete): ${notes.slice(0, 1200)} ` : '') +
-    `If the audio is too short or unclear, say that briefly.`;
-  const payload = JSON.stringify({
-    contents: [
-      {
-        role: 'user',
-        parts: [
-          { text: promptText },
-          {
-            inlineData: {
-              mimeType: 'audio/mpeg',
-              data: audioBase64
-            }
-          }
-        ]
+  const basePrompt =
+    `You are PodBot, an assistant that answers spoken questions clearly. ` +
+    `Answer briefly in 2–4 spoken sentences, no markdown. ` +
+    `Use the recent podcast snippet and episode notes if relevant, but do not limit yourself to them. ` +
+    `You may use general knowledge to answer accurately.` +
+    (notes ? ` Episode notes (may be incomplete): ${notes.slice(0, 1200)}.` : '');
+  const parts = [{ text: basePrompt + (question ? ` Question: ${question}` : '') }];
+  if (audioBase64) {
+    parts.push({
+      inlineData: {
+        mimeType: 'audio/mpeg',
+        data: audioBase64
       }
-    ],
-    generationConfig: {
-      temperature: 0.3,
-      maxOutputTokens: 180
+    });
+  }
+  async function doCall({ withGrounding }) {
+    const body = {
+      contents: [{ role: 'user', parts }],
+      generationConfig: {
+        temperature: 0.3,
+        maxOutputTokens: 220
+      }
+    };
+    if (withGrounding) {
+      // Attempt Google Search grounding; some models may ignore or reject
+      body.tools = [{ googleSearchRetrieval: {} }];
     }
-  });
-  const options = {
-    protocol: 'https:',
-    hostname: host,
-    port: 443,
-    path,
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Content-Length': Buffer.byteLength(payload),
-      'x-goog-api-key': GEMINI_API_KEY
-    }
-  };
-  const res = await httpRequest(options, Buffer.from(payload), { timeoutMs: 6000, maxRedirects: 0 });
+    const payload = JSON.stringify(body);
+    const options = {
+      protocol: 'https:',
+      hostname: host,
+      port: 443,
+      path,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+        'x-goog-api-key': GEMINI_API_KEY
+      }
+    };
+    const res = await httpRequest(options, Buffer.from(payload), { timeoutMs: 6000, maxRedirects: 0 });
+    return res;
+  }
+  let res = await doCall({ withGrounding: !!ENABLE_GOOGLE_GROUNDING });
+  if (res.statusCode === 400 && ENABLE_GOOGLE_GROUNDING) {
+    // Retry once without grounding if the model rejects tools
+    res = await doCall({ withGrounding: false });
+  }
   if (res.statusCode < 200 || res.statusCode >= 300) {
     throw new Error(`Gemini HTTP ${res.statusCode}`);
   }
   const data = JSON.parse(res.body.toString('utf8'));
-  const parts = (((data || {}).candidates || [])[0] || {}).content?.parts || [];
-  const text = parts.map((p) => p.text).filter(Boolean).join(' ').trim();
+  const outParts = (((data || {}).candidates || [])[0] || {}).content?.parts || [];
+  const text = outParts.map((p) => p.text).filter(Boolean).join(' ').trim();
   return text || 'Sorry, I could not determine that.';
 }
 
@@ -390,7 +399,7 @@ const LaunchRequestHandler = {
   },
   async handle(handlerInput) {
     const speakOutput =
-      'Welcome to Podcast Bot. Say, play Morning Brew, or ask what did I just miss.';
+      'Welcome to PodBot. Say, play Morning Brew, or ask what did I just miss.';
     return handlerInput.responseBuilder
       .speak(speakOutput)
       .reprompt('Say, play Morning Brew.')
@@ -450,36 +459,23 @@ const PlayPodcastIntentHandler = {
   }
 };
 
-const AskAboutIntentHandler = {
-  canHandle(handlerInput) {
-    const { requestEnvelope } = handlerInput;
-    const type = Alexa.getRequestType(requestEnvelope);
-    const intentName = Alexa.getIntentName(requestEnvelope) || '';
-    return type === 'IntentRequest' && intentName === 'AskAboutIntent';
-  },
-  async handle(handlerInput) {
-    const { requestEnvelope } = handlerInput;
-    const attributesManager = handlerInput.attributesManager;
-    const topic = Alexa.getSlotValue(requestEnvelope, 'topic') || '';
-    const playerActivity = requestEnvelope.context?.AudioPlayer?.playerActivity || 'IDLE';
-    const wasPlaying = playerActivity === 'PLAYING';
-    const ctxOffset = requestEnvelope.context?.AudioPlayer?.offsetInMilliseconds;
+async function handleOpenQuestion(handlerInput, questionFromUser) {
+  const { requestEnvelope } = handlerInput;
+  const attributesManager = handlerInput.attributesManager;
+  const playerActivity = requestEnvelope.context?.AudioPlayer?.playerActivity || 'IDLE';
+  const wasPlaying = playerActivity === 'PLAYING';
+  const ctxOffset = requestEnvelope.context?.AudioPlayer?.offsetInMilliseconds;
+  const state = await getState(attributesManager);
+  const url = state.lastUrl;
+  const offsetMs = typeof ctxOffset === 'number' ? ctxOffset : (state.lastOffsetMs || 0);
 
-    const state = await getState(attributesManager);
-    const url = state.lastUrl;
-    const offsetMs = typeof ctxOffset === 'number' ? ctxOffset : (state.lastOffsetMs || 0);
-    if (!url) {
-      return handlerInput.responseBuilder
-        .speak('Nothing is playing yet. Say, play Morning Brew.')
-        .reprompt('Say, play Morning Brew.')
-        .getResponse();
-    }
-    // Send progressive response
-    await sendProgressiveResponse(handlerInput, 'One sec.');
+  await sendProgressiveResponse(handlerInput, 'One sec.');
 
-    let answer = 'Sorry, I could not get that.';
-    try {
-      // Ensure we have metadata
+  let answer = 'Sorry, I could not get that.';
+  try {
+    let audioBase64 = null;
+    if (url) {
+      // Try to include last ~75s snippet for context
       const id3Size = state.id3Size ?? 0;
       const bytesPerSecond = state.bytesPerSecond ?? (await probeMp3Metadata(url)).bytesPerSecond;
       const lookbackMs = (LOOKBACK_SECONDS || 75) * 1000;
@@ -488,26 +484,52 @@ const AskAboutIntentHandler = {
       const endByte = startByte + Math.max(2048, Math.floor((lookbackMs / 1000) * bytesPerSecond)) - 1;
       const rangeBuf = await fetchMp3Range(url, startByte, endByte);
       const trimmed = trimToFrameSync(rangeBuf);
-      const audioBase64 = trimmed.toString('base64');
-      answer = await callGeminiSummarize({
-        audioBase64,
-        topic,
-        notes: state.lastNotes || ''
-      });
-    } catch (err) {
-      console.error('AskAbout error:', err);
-      answer = 'Sorry, I could not analyze that just now.';
+      audioBase64 = trimmed.toString('base64');
     }
+    answer = await callGeminiAnswer({
+      question: questionFromUser || '',
+      audioBase64,
+      notes: state.lastNotes || ''
+    });
+  } catch (err) {
+    console.error('OpenQuestion error:', err);
+    answer = 'Sorry, I could not analyze that just now.';
+  }
 
-    const rb = handlerInput.responseBuilder.speak(answer);
-    // Resume if we were playing
-    if (wasPlaying && state.lastUrl && state.lastToken != null) {
-      const directive = buildPlayDirective(state.lastUrl, state.lastToken, offsetMs || 0);
-      rb.addDirective(directive).withShouldEndSession(true);
-    } else {
-      rb.reprompt('You can say, play Morning Brew.');
-    }
-    return rb.getResponse();
+  const rb = handlerInput.responseBuilder.speak(
+    wasPlaying ? `${answer} Say resume to continue.` : answer
+  );
+  if (wasPlaying) {
+    rb.reprompt('Say resume to continue.');
+  } else {
+    rb.reprompt('You can say, play Morning Brew.');
+  }
+  return rb.getResponse();
+}
+
+const AskAboutIntentHandler = {
+  canHandle(handlerInput) {
+    const { requestEnvelope } = handlerInput;
+    const type = Alexa.getRequestType(requestEnvelope);
+    const intentName = Alexa.getIntentName(requestEnvelope) || '';
+    return type === 'IntentRequest' && intentName === 'AskAboutIntent';
+  },
+  async handle(handlerInput) {
+    const topic = Alexa.getSlotValue(handlerInput.requestEnvelope, 'topic') || '';
+    return handleOpenQuestion(handlerInput, topic);
+  }
+};
+
+const OpenQuestionIntentHandler = {
+  canHandle(handlerInput) {
+    const { requestEnvelope } = handlerInput;
+    const type = Alexa.getRequestType(requestEnvelope);
+    const intentName = Alexa.getIntentName(requestEnvelope) || '';
+    return type === 'IntentRequest' && intentName === 'OpenQuestionIntent';
+  },
+  async handle(handlerInput) {
+    const q = Alexa.getSlotValue(handlerInput.requestEnvelope, 'q') || '';
+    return handleOpenQuestion(handlerInput, q);
   }
 };
 
@@ -567,18 +589,18 @@ const SimpleResponseIntentHandler = {
     ]);
     return type === 'IntentRequest' && simpleIntents.has(name);
   },
-  handle(handlerInput) {
+  async handle(handlerInput) {
     const name = Alexa.getIntentName(handlerInput.requestEnvelope) || '';
     let speakOutput = '';
     const rb = handlerInput.responseBuilder;
     const withReprompt = () => rb.reprompt('You can say, play Morning Brew.').getResponse();
     switch (name) {
       case 'AMAZON.HelpIntent':
-        speakOutput = 'Say, play Morning Brew, or ask, what did I just miss.';
+        speakOutput = 'Say, play Morning Brew, or ask me a question like, what is compute.';
         return rb.speak(speakOutput).reprompt('You can say, play Morning Brew.').getResponse();
       case 'AMAZON.FallbackIntent':
-        speakOutput = 'Sorry, I did not get that. You can say, play Morning Brew.';
-        return rb.speak(speakOutput).reprompt('You can say, play Morning Brew.').getResponse();
+        // Route to open question flow with no specific query
+        return handleOpenQuestion(handlerInput, '');
       case 'AMAZON.StartOverIntent':
         return (async () => {
           const state = await getState(handlerInput.attributesManager);
@@ -721,6 +743,7 @@ exports.handler = skillBuilder
     LaunchRequestHandler,
     PlayPodcastIntentHandler,
     AskAboutIntentHandler,
+    OpenQuestionIntentHandler,
     PauseIntentHandler,
     ResumeIntentHandler,
     SimpleResponseIntentHandler,

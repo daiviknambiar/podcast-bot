@@ -1,7 +1,7 @@
 {
   "interactionModel": {
     "languageModel": {
-      "invocationName": "podcast bot",
+      "invocationName": "pod bot",
       "intents": [
         {
           "name": "PlayPodcastIntent",
@@ -15,6 +15,30 @@
             "start morning brew",
             "start the podcast",
             "play morning brew podcast"
+          ]
+        },
+        {
+          "name": "OpenQuestionIntent",
+          "slots": [
+            {
+              "name": "q",
+              "type": "AMAZON.SearchQuery"
+            }
+          ],
+          "samples": [
+            "what is {q}",
+            "who is {q}",
+            "why {q}",
+            "tell me {q}",
+            "explain {q}",
+            "what did they say about {q}",
+            "how {q}",
+            "is {q}",
+            "can you {q}",
+            "did {q}",
+            "when {q}",
+            "where {q}",
+            "{q}"
           ]
         },
         {

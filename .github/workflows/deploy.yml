@@ -111,6 +111,7 @@ jobs:
           GIT_TRACE=0 git push --force alexa HEAD:master
 
       - name: Fallback push via credential-store
+        id: push_fallback
         if: steps.push_helper.outcome == 'failure'
         env:
           REPO_URL: ${{ steps.hosted.outputs.repo_url }}
@@ -139,4 +140,36 @@ jobs:
             echo "::add-mask::$BASIC"
             GIT_TRACE=0 git -c credential.helper= -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" push --force alexa HEAD:master
           fi
+
+      - name: Update manifest via SMAPI (development)
+        if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
+        run: |
+          ask smapi update-skill-manifest -s "$SKILL_ID" --stage development --manifest file:skill-package/skill.json --profile default
+
+      - name: Update interaction model via SMAPI (en-US)
+        if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
+        run: |
+          ask smapi set-interaction-model -s "$SKILL_ID" --stage development --locale en-US --interaction-model file:skill-package/interactionModels/custom/en-US.json --profile default
+
+      - name: Poll interaction model build to succeed
+        if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
+        run: |
+          n=0
+          until [ $n -ge 24 ]; do
+            STATUS_JSON="$(ask smapi get-skill-status -s "$SKILL_ID" --profile default)"
+            echo "$STATUS_JSON" | jq -r '.manifest.lastUpdateRequest.status?, .interactionModel.custom["en-US"].lastUpdateRequest.status?' | paste - -
+            MODEL_STATUS="$(echo "$STATUS_JSON" | jq -r '.interactionModel.custom["en-US"].lastUpdateRequest.status?')"
+            if [ "$MODEL_STATUS" = "SUCCEEDED" ]; then
+              echo "Interaction model build SUCCEEDED."
+              exit 0
+            fi
+            if [ "$MODEL_STATUS" = "FAILED" ]; then
+              echo "::error title=Interaction model build failed::$(echo "$STATUS_JSON" | jq -r '.interactionModel.custom["en-US"].lastUpdateRequest.errors? // empty')"
+              exit 1
+            fi
+            n=$((n+1))
+            sleep 5
+          done
+          echo "::error title=Timeout waiting for interaction model build::No SUCCEEDED within timeout."
+          exit 1
 

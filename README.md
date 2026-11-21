@@ -1,19 +1,20 @@
-Podcast Bot — Alexa-hosted custom skill (Node.js)
+PodBot — Alexa-hosted custom skill (Node.js)
 
-This repository contains the source for an Alexa-hosted skill named "Podcast Bot". It plays the latest Morning Brew Daily episode and lets you ask about what you just heard using Gemini.
+This repository contains the source for an Alexa-hosted skill named "PodBot". It plays the latest Morning Brew Daily episode and lets you ask open questions or what you just heard using Gemini.
 
 Quick start
-- Invocation name: "podcast bot"
+- Invocation name: "pod bot"
 - Example phrases:
-  - "Alexa, ask Podcast Bot to play Morning Brew"
-  - "Alexa, ask Podcast Bot what did they just say about AI regulation"
-  - "Alexa, ask Podcast Bot what did I just miss"
-  - "Alexa, ask Podcast Bot what was that"
+  - "Alexa, ask pod bot to play Morning Brew"
+  - "Alexa, ask pod bot what did they just say about AI regulation"
+  - "Alexa, ask pod bot what is compute"
+  - "Alexa, ask pod bot what did I just miss"
+  - "Alexa, ask pod bot what was that"
 
 What it does
 - Streams the newest Morning Brew Daily episode via the AudioPlayer interface
 - Remembers playback offset and resumes the same episode
-- For "what did they just say about {topic}", fetches the last ~75 seconds of audio, sends it to Gemini with your question, and speaks a 2–3 sentence answer, then resumes playback
+- For "what did they just say about {topic}" and open questions, fetches the last ~75 seconds of audio (when available) and sends it along with your question to Gemini for a short spoken answer; then offers to resume playback
 
 Repository layout (ASK CLI v2)
 - `skill-package/` — skill manifest and interaction model
