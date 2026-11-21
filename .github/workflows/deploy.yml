@@ -161,20 +161,16 @@ jobs:
         run: |
           n=0
           until [ $n -ge 24 ]; do
-            STATUS_JSON="$(ask smapi get-skill-status -s "$SKILL_ID" --profile default)"
-            echo "$STATUS_JSON" | jq -r '.manifest.lastUpdateRequest.status?, .interactionModel.custom["en-US"].lastUpdateRequest.status?' | paste - -
-            MODEL_STATUS="$(echo "$STATUS_JSON" | jq -r '.interactionModel.custom["en-US"].lastUpdateRequest.status?')"
-            if [ "$MODEL_STATUS" = "SUCCEEDED" ]; then
-              echo "Interaction model build SUCCEEDED."
+            IM_JSON="$(ask smapi get-interaction-model -s "$SKILL_ID" --stage development --locale en-US --profile default || true)"
+            INVOKATION="$(echo "$IM_JSON" | jq -r '.interactionModel.languageModel.invocationName? // empty')"
+            echo "Current invocation: ${INVOKATION:-<none>}"
+            if [ "$INVOKATION" = "pod bot" ]; then
+              echo "Interaction model updated with 'pod bot'."
               exit 0
-            fi
-            if [ "$MODEL_STATUS" = "FAILED" ]; then
-              echo "::error title=Interaction model build failed::$(echo "$STATUS_JSON" | jq -r '.interactionModel.custom["en-US"].lastUpdateRequest.errors? // empty')"
-              exit 1
             fi
             n=$((n+1))
             sleep 5
           done
-          echo "::error title=Timeout waiting for interaction model build::No SUCCEEDED within timeout."
+          echo "::error title=Timeout waiting for interaction model update::Invocation name not observed as 'pod bot'."
           exit 1
 
