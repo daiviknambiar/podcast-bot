@@ -180,23 +180,35 @@ jobs:
         run: |
           ask smapi set-interaction-model -s "$SKILL_ID" --stage development --locale en-US --interaction-model file:skill-package/interactionModels/custom/en-US.json --profile default
 
-      - name: Poll interaction model build to succeed
+      - name: Poll interaction model build status (fail on error)
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
-        continue-on-error: true
         run: |
           n=0
           until [ $n -ge 24 ]; do
-            IM_JSON="$(ask smapi get-interaction-model -s "$SKILL_ID" --stage development --locale en-US --profile default || true)"
-            INVOKATION="$(echo "$IM_JSON" | jq -r '.interactionModel.languageModel.invocationName? // empty')"
-            echo "Current invocation: ${INVOKATION:-<none>}"
-            if [ "$INVOKATION" = "pod bot" ]; then
-              echo "Interaction model updated with 'pod bot'."
-              exit 0
+            STATUS_JSON="$(ask smapi get-skill-status -s "$SKILL_ID" --resource interactionModel --profile default || true)"
+            MODEL_STATUS="$(echo "$STATUS_JSON" | jq -r '.interactionModel.custom["en-US"].lastUpdateRequest.status? // empty')"
+            echo "Model build status: ${MODEL_STATUS:-<unknown>}"
+            if [ "$MODEL_STATUS" = "SUCCEEDED" ]; then
+              echo "Interaction model build SUCCEEDED."
+              break
+            fi
+            if [ "$MODEL_STATUS" = "FAILED" ]; then
+              echo "::error title=Interaction model build failed::$(echo "$STATUS_JSON" | jq -r '.interactionModel.custom["en-US"].lastUpdateRequest.errors? // empty')"
+              exit 1
             fi
             n=$((n+1))
             sleep 5
           done
-          echo "::warning title=Invocation name not confirmed::Invocation name not observed as 'pod bot' within timeout."
+
+      - name: Confirm invocation name
+        if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
+        run: |
+          IM_JSON="$(ask smapi get-interaction-model -s "$SKILL_ID" --stage development --locale en-US --profile default || true)"
+          INVOKATION="$(echo "$IM_JSON" | jq -r '.interactionModel.languageModel.invocationName? // empty')"
+          echo "Current invocation: ${INVOKATION:-<none>}"
+          if [ "$INVOKATION" != "pod bot" ]; then
+            echo "::warning title=Invocation name differs::Observed invocation='$INVOKATION' (expected 'pod bot')."
+          fi
 
       - name: Check hosted skill deployment status
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'

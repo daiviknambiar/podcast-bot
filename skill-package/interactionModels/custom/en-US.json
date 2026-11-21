@@ -28,17 +28,16 @@
           "samples": [
             "what is {q}",
             "who is {q}",
-            "why {q}",
-            "tell me {q}",
-            "explain {q}",
+            "why is {q}",
+            "tell me about {q}",
+            "explain {q} simply",
             "what did they say about {q}",
-            "how {q}",
-            "is {q}",
-            "can you {q}",
-            "did {q}",
-            "when {q}",
-            "where {q}",
-            "{q}"
+            "how does {q} work",
+            "is {q} true",
+            "can you explain {q}",
+            "did {q} happen",
+            "when is {q}",
+            "where is {q}"
           ]
         },
         {
