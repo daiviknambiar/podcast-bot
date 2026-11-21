@@ -145,7 +145,16 @@ jobs:
           fi
           FALLBACK="$(echo "$LIST" | grep -E -m1 '^models/gemini-3\.8-(flash-lite|mini)(|-.+)?$' || true)"
           if [ -n "$PRIMARY" ]; then
-            node -e "const fs=require('fs');let t=fs.readFileSync('lambda/config.js','utf8');t=t.replace(/GEMINI_MODEL:\\s*'[^']*'/,'GEMINI_MODEL: \\''+$PRIMARY+'\\'');if(t.includes('GEMINI_FALLBACK_MODELS')){t=t.replace(/GEMINI_FALLBACK_MODELS:\\s*\\[[^\\]]*\\]/,'GEMINI_FALLBACK_MODELS: ['+(process.env.FALLBACK?('\\''+process.env.FALLBACK+'\\''):'')+']');}else{t=t.replace(/}\\s*;\\s*$/,(process.env.FALLBACK?`,\\n  GEMINI_FALLBACK_MODELS: ['`+process.env.FALLBACK+`']\\n};`:'\\n};'));}fs.writeFileSync('lambda/config.js',t);" 
+            # Replace primary model in lambda/config.js (keep file format)
+            sed -i -E "s#GEMINI_MODEL:\\s*'[^']*'#GEMINI_MODEL: '${PRIMARY}'#g" lambda/config.js
+            if [ -n "$FALLBACK" ]; then
+              if grep -q 'GEMINI_FALLBACK_MODELS' lambda/config.js; then
+                sed -i -E "s#GEMINI_FALLBACK_MODELS:\\s*\\[[^\\]]*\\]#GEMINI_FALLBACK_MODELS: ['${FALLBACK}']#g" lambda/config.js
+              else
+                # Insert before closing brace
+                awk -v fb="${FALLBACK}" 'BEGIN{ins=0} {print} /};/{if(!ins){print "  ,GEMINI_FALLBACK_MODELS: [\x27" fb "\x27]"; ins=1}}' lambda/config.js > lambda/config.js.tmp && mv lambda/config.js.tmp lambda/config.js
+              fi
+            fi
             git add lambda/config.js
             if ! git diff --cached --quiet; then
               git commit -m "ci: set Gemini primary to $PRIMARY and fallback to ${FALLBACK:-<none>}"
