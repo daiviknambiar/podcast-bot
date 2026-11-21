@@ -7,6 +7,9 @@ module.exports = {
     'models/gemini-2.5-flash-lite',
     'models/gemini-3.8-flash'
   ],
+  // OpenAI preferred (cheapest first)
+  OPENAI_MODEL: 'gpt-4.1-nano',
+  OPENAI_FALLBACK_MODELS: ['gpt-4o-mini', 'gpt-5-nano', 'gpt-5-mini'],
   LOOKBACK_SECONDS: 75,
   FEED_URL: 'https://feeds.megaphone.fm/MOBI8777994188',
   // Grounding disabled by default; it often has separate/zero quota

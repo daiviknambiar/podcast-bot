@@ -92,19 +92,18 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Prepare CI-only branch with Gemini key (not pushed to GitHub)
+      - name: Prepare CI-only branch with secrets file (not pushed to GitHub)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           PODBOT_WEBHOOK_URL: ${{ secrets.PODBOT_WEBHOOK_URL }}
           PODBOT_WEBHOOK_KEY: ${{ secrets.PODBOT_WEBHOOK_KEY }}
         run: |
           DEP_BRANCH="ci/alexa-deploy-${GITHUB_SHA}"
           git checkout -b "$DEP_BRANCH"
-          if [ -n "$GEMINI_API_KEY" ]; then
-            node -e "const fs=require('fs');const k=process.env.GEMINI_API_KEY||'';const wurl=process.env.PODBOT_WEBHOOK_URL||'';const wkey=process.env.PODBOT_WEBHOOK_KEY||'';const esc=s=>s.replace(/'/g,\"\\\\'\");let out='module.exports = {\\n  GEMINI_API_KEY: \\''+esc(k)+'\\'';if(wurl) out+=',\\n  PODBOT_WEBHOOK_URL: \\''+esc(wurl)+'\\'';if(wkey) out+=',\\n  PODBOT_WEBHOOK_KEY: \\''+esc(wkey)+'\\'';out+=',\\n  PODBOT_AUTH_HEADER: \\''+'Authorization'+'\\'\\n};';fs.writeFileSync('lambda/gemini-key.js',out);"
-            git add -f lambda/gemini-key.js
-            git commit -m "ci: add gemini key for hosted deploy (CI-only)"
-          fi
+          node -e "const fs=require('fs');const esc=s=>String(s||'').replace(/'/g,\"\\\\'\");const wall=esc(process.env.PODBOT_WEBHOOK_URL);const wkey=esc(process.env.PODBOT_WEBHOOK_KEY);const g=esc(process.env.GEMINI_API_KEY);const o=esc(process.env.OPENAI_API_KEY);let out='module.exports = {\\n'; if (g) out+=`  GEMINI_API_KEY: '${g}',\\n`; if (o) out+=`  OPENAI_API_KEY: '${o}',\\n`; if (wall) out+=`  PODBOT_WEBHOOK_URL: '${wall}',\\n`; if (wkey) out+=`  PODBOT_WEBHOOK_KEY: '${wkey}',\\n`; out+=`  PODBOT_AUTH_HEADER: 'Authorization'\\n};`; fs.writeFileSync('lambda/gemini-key.js',out);"
+          git add -f lambda/gemini-key.js
+          git commit -m "ci: add secrets file for hosted deploy (CI-only)"
           # Confirm config file presence (without revealing values)
           if [ -f lambda/gemini-key.js ]; then
             echo "gemini-key.js: present"
@@ -130,6 +129,26 @@ jobs:
           fi
           echo "Available models (generateContent):"
           echo "$MODELS_JSON" | jq -r '.models[]? | select((.supportedGenerationMethods // []) | index("generateContent")) | .name' | sort -u
+
+      - name: List OpenAI models (names only)
+        if: env.OPENAI_API_KEY != ''
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          curl -s -H "Authorization: Bearer $OPENAI_API_KEY" https://api.openai.com/v1/models | jq -r '.data[]?.id' | sort -u | head -n 200
+
+      - name: Probe OpenAI candidate models
+        if: env.OPENAI_API_KEY != ''
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          CANDIDATES=("gpt-4.1-nano" "gpt-4o-mini" "gpt-5-nano" "gpt-5-mini")
+          for M in "${CANDIDATES[@]}"; do
+            BODY='{"model":"'"$M"'","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}'
+            STATUS=$(curl -sS -m 2.5 -w "%{http_code}" -o /tmp/o.out -H "Authorization: Bearer $OPENAI_API_KEY" -H "Content-Type: application/json" -X POST -d "$BODY" https://api.openai.com/v1/chat/completions || true)
+            TYPE=$(jq -r '.error.type? // .object? // empty' /tmp/o.out 2>/dev/null | head -c 120)
+            echo "$M -> $STATUS ${TYPE:+- $TYPE}"
+          done
 
       # Probe candidate models to see which have quota (no grounding, 1-token)
       - name: Probe Gemini candidate models

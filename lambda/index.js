@@ -6,9 +6,18 @@ const { S3PersistenceAdapter } = require('ask-sdk-s3-persistence-adapter');
 const { DynamoDbPersistenceAdapter } = require('ask-sdk-dynamodb-persistence-adapter');
 const AWS = require('aws-sdk');
 const https = require('https');
-const { FEED_URL, LOOKBACK_SECONDS, GEMINI_MODEL, ENABLE_GOOGLE_GROUNDING, GEMINI_FALLBACK_MODELS } = require('./config');
+const {
+  FEED_URL,
+  LOOKBACK_SECONDS,
+  GEMINI_MODEL,
+  ENABLE_GOOGLE_GROUNDING,
+  GEMINI_FALLBACK_MODELS,
+  OPENAI_MODEL,
+  OPENAI_FALLBACK_MODELS
+} = require('./config');
 
 let GEMINI_API_KEY = process.env.GEMINI_API_KEY || null;
+let OPENAI_API_KEY = process.env.OPENAI_API_KEY || null;
 let PODBOT_WEBHOOK_URL = process.env.PODBOT_WEBHOOK_URL || null;
 let PODBOT_WEBHOOK_KEY = process.env.PODBOT_WEBHOOK_KEY || null;
 let PODBOT_AUTH_HEADER = process.env.PODBOT_AUTH_HEADER || 'Authorization';
@@ -17,6 +26,7 @@ try {
   // module.exports = { GEMINI_API_KEY: '...' }
   const localKey = require('./gemini-key.js');
   if (localKey && localKey.GEMINI_API_KEY) { GEMINI_API_KEY = localKey.GEMINI_API_KEY; }
+  if (localKey && localKey.OPENAI_API_KEY) { OPENAI_API_KEY = localKey.OPENAI_API_KEY; }
   if (localKey && localKey.PODBOT_WEBHOOK_URL) { PODBOT_WEBHOOK_URL = localKey.PODBOT_WEBHOOK_URL; }
   if (localKey && localKey.PODBOT_WEBHOOK_KEY) { PODBOT_WEBHOOK_KEY = localKey.PODBOT_WEBHOOK_KEY; }
   if (localKey && localKey.PODBOT_AUTH_HEADER) { PODBOT_AUTH_HEADER = localKey.PODBOT_AUTH_HEADER; }
@@ -270,6 +280,77 @@ function normalizeModelName(name) {
   return name.startsWith('models/') ? name.slice('models/'.length) : name;
 }
 
+async function callOpenAIAnswer({ question, notes, model = OPENAI_MODEL }) {
+  if (!OPENAI_API_KEY) throw new Error('Missing OPENAI_API_KEY (env or lambda/gemini-key.js)');
+  const host = 'api.openai.com';
+  const path = '/v1/chat/completions';
+  const systemPrompt =
+    'You are PodBot. Answer clearly in 2–4 short spoken sentences. ' +
+    'Use general knowledge first, then any provided episode notes as extra context. ' +
+    'No markdown, no code blocks, no links.';
+  const userText =
+    (question ? `Question: ${question}\n` : '') +
+    (notes ? `Episode notes (may be incomplete): ${notes.slice(0, 1200)}` : '');
+  async function doCall({ useModel = model, timeoutMs = 2500 }) {
+    const body = JSON.stringify({
+      model: useModel,
+      max_tokens: 200,
+      temperature: 0.3,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userText || 'Answer briefly.' }
+      ]
+    });
+    const options = {
+      protocol: 'https:',
+      hostname: host,
+      port: 443,
+      path,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+        Authorization: `Bearer ${OPENAI_API_KEY}`
+      }
+    };
+    return httpRequest(options, Buffer.from(body), { timeoutMs, maxRedirects: 0 });
+  }
+  const TOTAL_BUDGET_MS = 6500;
+  const PER_REQUEST_TIMEOUT_MS = 2500;
+  const startTs = Date.now();
+  const chain = [model].concat(Array.isArray(OPENAI_FALLBACK_MODELS) ? OPENAI_FALLBACK_MODELS : []);
+  for (const useModel of chain) {
+    const elapsed = Date.now() - startTs;
+    const remaining = Math.max(0, TOTAL_BUDGET_MS - elapsed);
+    if (remaining < 400) break;
+    const timeoutMs = Math.max(700, Math.min(PER_REQUEST_TIMEOUT_MS, remaining - 200));
+    let res;
+    try {
+      res = await doCall({ useModel, timeoutMs });
+    } catch (err) {
+      console.error('OpenAI attempt error', { model: useModel, error: (err && err.message) || String(err) });
+      continue;
+    }
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      try {
+        const data = JSON.parse(res.body.toString('utf8'));
+        const text = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
+        if (text.trim()) {
+          console.log('OpenAI used model', useModel);
+          return text.trim();
+        }
+      } catch (e) {
+        console.error('OpenAI parse error', { model: useModel, error: (e && e.message) || String(e) });
+      }
+    } else {
+      const bodyTxt = (res.body || Buffer.from('')).toString('utf8').slice(0, 300);
+      console.error('OpenAI non-2xx', { model: useModel, status: res.statusCode, body: bodyTxt });
+      if (res.statusCode === 429 || res.statusCode === 404) continue;
+    }
+  }
+  throw new Error('OpenAI HTTP 503');
+}
+
 async function callGeminiAnswer({ question, audioBase64, notes, model = GEMINI_MODEL }) {
   if (!GEMINI_API_KEY) {
     throw new Error('Missing GEMINI_API_KEY (env or lambda/gemini-key.js)');
@@ -361,6 +442,26 @@ async function callGeminiAnswer({ question, audioBase64, notes, model = GEMINI_M
   }
   // All attempts failed
   throw new Error('Gemini HTTP 503');
+}
+
+async function getAnswer({ question, audioBase64, notes }) {
+  // Prefer OpenAI when key is present
+  if (OPENAI_API_KEY) {
+    try {
+      return await callOpenAIAnswer({ question, notes, model: OPENAI_MODEL });
+    } catch (e) {
+      console.error('OpenAI chain failed', (e && e.message) || String(e));
+    }
+  }
+  // Fallback to Gemini when key present
+  if (GEMINI_API_KEY) {
+    try {
+      return await callGeminiAnswer({ question, audioBase64, notes, model: GEMINI_MODEL });
+    } catch (e) {
+      console.error('Gemini chain failed', (e && e.message) || String(e));
+    }
+  }
+  throw new Error('No provider configured');
 }
 
 async function sendProgressiveResponse(handlerInput, speech) {
@@ -555,7 +656,7 @@ async function handleOpenQuestion(handlerInput, questionFromUser) {
       } catch {}
       audioBase64 = { recent: recentB64, upcoming: upcomingB64 };
     }
-    answer = await callGeminiAnswer({
+    answer = await getAnswer({
       question: questionFromUser || '',
       audioBase64,
       notes: state.lastNotes || ''
