@@ -295,7 +295,7 @@ async function callGeminiAnswer({ question, audioBase64, notes, model = GEMINI_M
   } else if (audioBase64) {
     parts.push({ inlineData: { mimeType: 'audio/mpeg', data: audioBase64 } });
   }
-  async function doCall({ withGrounding, useModel = model }) {
+  async function doCall({ withGrounding, useModel = model, timeoutMs = 2200 }) {
     const body = {
       contents: [{ role: 'user', parts }],
       generationConfig: {
@@ -320,36 +320,47 @@ async function callGeminiAnswer({ question, audioBase64, notes, model = GEMINI_M
         'x-goog-api-key': GEMINI_API_KEY
       }
     };
-    const res = await httpRequest(options, Buffer.from(payload), { timeoutMs: 6000, maxRedirects: 0 });
+    const res = await httpRequest(options, Buffer.from(payload), { timeoutMs, maxRedirects: 0 });
     return res;
   }
-  // Attempt 1: with grounding (if enabled) on primary model
-  let res = await doCall({ withGrounding: !!ENABLE_GOOGLE_GROUNDING, useModel: model });
-  // On 4xx, try without grounding
-  if (res.statusCode >= 400 && res.statusCode < 500) {
-    const bodyTxt = (res.body || Buffer.from('')).toString('utf8').slice(0, 600);
-    console.error('Gemini 4xx', { status: res.statusCode, body: bodyTxt });
-    res = await doCall({ withGrounding: false, useModel: model });
+  // Attempt chain with tight per-request timeout and total budget
+  const TOTAL_BUDGET_MS = 6500;
+  const PER_REQUEST_TIMEOUT_MS = 2200;
+  const startTs = Date.now();
+  const chain = [model].concat(Array.isArray(GEMINI_FALLBACK_MODELS) ? GEMINI_FALLBACK_MODELS : []);
+  for (const useModel of chain) {
+    const tryGroundingFirst = !!ENABLE_GOOGLE_GROUNDING;
+    const attemptGrounding = tryGroundingFirst ? [true, false] : [false];
+    for (const withGrounding of attemptGrounding) {
+      const elapsed = Date.now() - startTs;
+      const remaining = Math.max(0, TOTAL_BUDGET_MS - elapsed);
+      if (remaining < 400) break; // not enough time left
+      const timeoutMs = Math.max(700, Math.min(PER_REQUEST_TIMEOUT_MS, remaining - 200));
+      let res;
+      try {
+        res = await doCall({ withGrounding, useModel, timeoutMs });
+      } catch (err) {
+        console.error('Gemini attempt error', { model: useModel, grounding: withGrounding, error: (err && err.message) || String(err) });
+        // try next attempt or next model
+        continue;
+      }
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        const data = JSON.parse(res.body.toString('utf8'));
+        const outParts = (((data || {}).candidates || [])[0] || {}).content?.parts || [];
+        const text = outParts.map((p) => p.text).filter(Boolean).join(' ').trim();
+        return text || 'Sorry, I could not determine that.';
+      }
+      const bodyTxt = (res.body || Buffer.from('')).toString('utf8').slice(0, 600);
+      console.error('Gemini attempt non-2xx', { model: useModel, grounding: withGrounding, status: res.statusCode, body: bodyTxt });
+      if (res.statusCode === 429 || res.statusCode === 404) {
+        // Skip to next model immediately on quota or not found
+        break;
+      }
+      // otherwise, try without grounding (if not already), then continue/fallback
+    }
   }
-  // On 4xx again, try a lighter fallback model
-  if (res.statusCode >= 400 && res.statusCode < 500) {
-    const bodyTxt2 = (res.body || Buffer.from('')).toString('utf8').slice(0, 600);
-    console.error('Gemini fallback 4xx', { status: res.statusCode, body: bodyTxt2 });
-    const fallbacks = Array.isArray(GEMINI_FALLBACK_MODELS) && GEMINI_FALLBACK_MODELS.length
-      ? GEMINI_FALLBACK_MODELS
-      : ['models/gemini-3.8-flash-lite', 'models/gemini-3.8-mini'];
-    const fbModel = fallbacks[0];
-    res = await doCall({ withGrounding: false, useModel: fbModel });
-  }
-  if (res.statusCode < 200 || res.statusCode >= 300) {
-    const bodyTxt3 = (res.body || Buffer.from('')).toString('utf8').slice(0, 600);
-    console.error('Gemini error (final)', { status: res.statusCode, body: bodyTxt3 });
-    throw new Error(`Gemini HTTP ${res.statusCode}`);
-  }
-  const data = JSON.parse(res.body.toString('utf8'));
-  const outParts = (((data || {}).candidates || [])[0] || {}).content?.parts || [];
-  const text = outParts.map((p) => p.text).filter(Boolean).join(' ').trim();
-  return text || 'Sorry, I could not determine that.';
+  // All attempts failed
+  throw new Error('Gemini HTTP 503');
 }
 
 async function sendProgressiveResponse(handlerInput, speech) {
