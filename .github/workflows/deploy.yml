@@ -148,8 +148,20 @@ jobs:
         env:
           REPO_URL: ${{ steps.hosted.outputs.repo_url }}
         run: |
-          # Generate short-lived credentials
-          CREDS_JSON="$(ask smapi generate-credentials-for-alexa-hosted-skill -s "$SKILL_ID" --repository-url "$REPO_URL" --repository-type GIT --profile default)"
+          # Generate short-lived credentials with retry for transient SMAPI errors
+          tries=0
+          while :; do
+            tries=$((tries+1))
+            CREDS_JSON="$(ask smapi generate-credentials-for-alexa-hosted-skill -s "$SKILL_ID" --repository-url "$REPO_URL" --repository-type GIT --profile default || true)"
+            if [ -n "$CREDS_JSON" ] && echo "$CREDS_JSON" | jq -e . >/dev/null 2>&1; then
+              break
+            fi
+            if [ $tries -ge 4 ]; then
+              echo "::error title=Hosted credentials error::Failed to obtain credentials after $tries attempts."
+              exit 1
+            fi
+            sleep $((tries*2))
+          done
           USERNAME="$(printf "%s" "$CREDS_JSON" | jq -r '..|.username? // .userName? // empty' | head -n1)"
           PASSWORD="$(printf "%s" "$CREDS_JSON" | jq -r '..|.password? // .pass? // empty' | head -n1)"
           if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
@@ -177,48 +189,6 @@ jobs:
             BASIC="$(printf "%s:%s" "$USERNAME" "$PASSWORD" | base64 | tr -d '\n')"
             echo "::add-mask::$BASIC"
             GIT_TRACE=0 git -c credential.helper= -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" push --force alexa HEAD:dev
-          fi
-
-      - name: Ensure CodeCommit dev has a new commit (mirror files)
-        if: always()
-        env:
-          REPO_URL: ${{ steps.hosted.outputs.repo_url }}
-          PODBOT_WEBHOOK_URL: ${{ secrets.PODBOT_WEBHOOK_URL }}
-          PODBOT_WEBHOOK_KEY: ${{ secrets.PODBOT_WEBHOOK_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          CREDS_JSON="$(ask smapi generate-credentials-for-alexa-hosted-skill -s "$SKILL_ID" --repository-url "$REPO_URL" --repository-type GIT --profile default)"
-          USERNAME="$(printf "%s" "$CREDS_JSON" | jq -r '..|.username? // .userName? // empty' | head -n1)"
-          PASSWORD="$(printf "%s" "$CREDS_JSON" | jq -r '..|.password? // .pass? // empty' | head -n1)"
-          echo "::add-mask::$USERNAME"
-          echo "::add-mask::$PASSWORD"
-          CRED_FILE="$(mktemp)"
-          {
-            echo "url=$REPO_URL"
-            echo "username=$USERNAME"
-            echo "password=$PASSWORD"
-          } | git -c credential.helper="store --file $CRED_FILE" credential-store store
-          rm -rf alexa-dev
-          git -c credential.helper="store --file $CRED_FILE" clone "$REPO_URL" alexa-dev
-          cd alexa-dev
-          git -c credential.helper="store --file $CRED_FILE" fetch origin
-          git checkout dev || git checkout -b dev origin/dev
-          # Merge origin/master into dev to create a new commit (instead of ref force-only)
-          git -c credential.helper="store --file $CRED_FILE" merge --no-ff origin/master -m "ci: merge master into dev for hosted deploy" || true
-          # Mirror latest files
-          rsync -a --delete ../skill-package/ skill-package/
-          rsync -a --delete ../lambda/ lambda/
-          # Write CI-only gemini/webhook key into CodeCommit dev (forced add)
-          if [ -n "$GEMINI_API_KEY" ]; then
-            node -e "const fs=require('fs');const k=process.env.GEMINI_API_KEY||'';const wurl=process.env.PODBOT_WEBHOOK_URL||'';const wkey=process.env.PODBOT_WEBHOOK_KEY||'';const esc=s=>s.replace(/'/g,\"\\\\'\");let out='module.exports = {\\n  GEMINI_API_KEY: \\''+esc(k)+'\\'';if(wurl) out+=',\\n  PODBOT_WEBHOOK_URL: \\''+esc(wurl)+'\\'';if(wkey) out+=',\\n  PODBOT_WEBHOOK_KEY: \\''+esc(wkey)+'\\'';out+=',\\n  PODBOT_AUTH_HEADER: \\''+'Authorization'+'\\'\\n};';fs.writeFileSync('lambda/gemini-key.js',out);"
-            git add -f lambda/gemini-key.js
-          fi
-          git add skill-package lambda
-          if git diff --cached --quiet; then
-            echo "No changes to commit on dev."
-          else
-            git commit -m "ci: mirror repo to dev for hosted deploy"
-            git -c credential.helper="store --file $CRED_FILE" push origin dev
           fi
 
       - name: Update manifest via SMAPI (development)
@@ -322,4 +292,23 @@ jobs:
         run: |
           SIM_JSON="$(ask smapi simulate-skill -s "$SKILL_ID" --stage development --locale en-US --input 'ask pod bot what is a webhook' --profile default || true)"
           echo "$SIM_JSON" | jq -r '.'
+
+      - name: Report CodeCommit dev HEAD
+        if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
+        env:
+          REPO_URL: ${{ steps.hosted.outputs.repo_url }}
+        run: |
+          # Fresh credentials for ls-remote
+          CREDS_JSON="$(ask smapi generate-credentials-for-alexa-hosted-skill -s "$SKILL_ID" --repository-url "$REPO_URL" --repository-type GIT --profile default || true)"
+          USERNAME="$(printf "%s" "$CREDS_JSON" | jq -r '..|.username? // .userName? // empty' | head -n1)"
+          PASSWORD="$(printf "%s" "$CREDS_JSON" | jq -r '..|.password? // .pass? // empty' | head -n1)"
+          echo "::add-mask::$USERNAME"
+          echo "::add-mask::$PASSWORD"
+          if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
+            echo "Could not fetch CodeCommit HEAD SHA."
+            exit 0
+          fi
+          BASIC="$(printf "%s:%s" "$USERNAME" "$PASSWORD" | base64 | tr -d '\n')"
+          SHA="$(git -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" ls-remote "$REPO_URL" dev | awk '{print $1}')"
+          echo "CodeCommit dev HEAD: ${SHA:-<unknown>}"
 
