@@ -791,7 +791,6 @@ async function handleOpenQuestion(handlerInput, questionFromUser, carrierWord) {
     const elapsed = Date.now() - qaStart;
     const remainingForLLM = Math.max(800, QA_TOTAL_MS - elapsed);
     const hint = carrierWord ? `${carrierWord} ${qText}` : qText;
-    const isEpisodeQuestion = /\b(they|this|that|it|episode|podcast|host|hosts)\b/i.test(`${carrierWord || ''} ${qText}`);
     // Bound the entire answer generation to remainingForLLM
     answer = await withTimeout(
       answerCaller({
