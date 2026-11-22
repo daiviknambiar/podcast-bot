@@ -321,11 +321,58 @@ jobs:
           echo "Logging interceptor in origin/dev lambda/index.js:"
           git show origin/dev:lambda/index.js | grep -n 'LoggingRequestInterceptor' || true
 
-      - name: Update manifest via SMAPI (development)
+      - name: Update manifest via SMAPI (development; print 400 body)
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
-        continue-on-error: true
         run: |
-          ask smapi update-skill-manifest -s "$SKILL_ID" --stage development --manifest file:skill-package/skill.json --profile default
+          FILE="skill-package/skill.json"
+          set +e
+          OUT_STD="$(mktemp)"; OUT_ERR="$(mktemp)"
+          ask smapi update-skill-manifest -s "$SKILL_ID" --stage development --manifest "file:$FILE" --profile default 1>"$OUT_STD" 2>"$OUT_ERR"
+          RET=$?
+          set -e
+          if [ $RET -ne 0 ]; then
+            echo "::warning title=SMAPI update-skill-manifest failed::Printing ASK CLI stderr below."
+            cat "$OUT_ERR" || true
+            echo "Attempting raw SMAPI PUT to capture full 400 body..."
+            TOK_JSON="$(ask util generate-lwa-tokens --no-browser --profile default 2>/dev/null || true)"
+            ACCESS_TOKEN="$(echo "$TOK_JSON" | jq -r '.access_token? // empty')"
+            if [ -n "$ACCESS_TOKEN" ]; then
+              HTTP_STATUS=$(curl -sS -w "%{http_code}" -o /tmp/manifest_body.out -X PUT \
+                -H "Authorization: Bearer $ACCESS_TOKEN" -H "Content-Type: application/json" \
+                --data-binary "@$FILE" \
+                "https://api.amazonalexa.com/v1/skills/${SKILL_ID}/stages/development/manifest" || true)
+              echo "Raw SMAPI PUT (manifest) status: $HTTP_STATUS"
+              echo "Raw SMAPI (manifest) response body:"
+              cat /tmp/manifest_body.out || true
+              if [ "$HTTP_STATUS" != "202" ]; then
+                echo "::error title=Manifest update failed::Raw SMAPI PUT did not return 202. See body above."
+                exit 1
+              fi
+            else
+              echo "::error title=Token error::Could not obtain access token to fetch full 400 body."
+              exit 1
+            fi
+          fi
+
+      - name: Poll manifest build status (fail on error)
+        if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
+        run: |
+          n=0
+          until [ $n -ge 24 ]; do
+            STATUS_JSON="$(ask smapi get-skill-status -s "$SKILL_ID" --resource manifest --profile default || true)"
+            MAN_STATUS="$(echo "$STATUS_JSON" | jq -r '.manifest.lastUpdateRequest.status? // empty')"
+            echo "Manifest build status: ${MAN_STATUS:-<unknown>}"
+            if [ "$MAN_STATUS" = "SUCCEEDED" ]; then
+              echo "Manifest build SUCCEEDED."
+              break
+            fi
+            if [ "$MAN_STATUS" = "FAILED" ]; then
+              echo "::error title=Manifest build failed::$(echo "$STATUS_JSON" | jq -r '.manifest.lastUpdateRequest.errors? // empty')"
+              exit 1
+            fi
+            n=$((n+1))
+            sleep 5
+          done
 
       - name: Update interaction model via SMAPI (en-US; print 400 body)
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
@@ -513,6 +560,39 @@ jobs:
             return 1
           }
           attempt_sim "ask pod bot why is the sky blue"
+
+      - name: Simulate skill (Play Morning Brew) with retries
+        if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
+        run: |
+          attempt_sim () {
+            local INPUT="$1"
+            local TRY=0
+            local SID=""
+            while [ $TRY -lt 5 ]; do
+              TRY=$((TRY+1))
+              SIM_JSON="$(ask smapi simulate-skill -s "$SKILL_ID" --stage development --device-locale en-US --input-content "$INPUT" --profile default || true)"
+              SID="$(echo "$SIM_JSON" | jq -r '.id? // empty')"
+              echo "Simulation try $TRY id: ${SID:-<none>}"
+              if [ -n "$SID" ]; then
+                for i in $(seq 1 20); do
+                  OUT="$(ask smapi get-skill-simulation -s "$SKILL_ID" --simulation-id "$SID" --profile default || true)"
+                  STATUS="$(echo "$OUT" | jq -r '.status? // empty')"
+                  echo "Simulation status: ${STATUS:-<unknown>}"
+                  if [ "$STATUS" = "SUCCESSFUL" ] || [ "$STATUS" = "FAILED" ]; then
+                    echo "Directives summary:"
+                    echo "$OUT" | jq -r '.result?.alexaExecutionInfo?.skillExecutionInfo?.invocationResponse?.body?.response?.directives // [] | map({type, url: (.audioItem?.stream?.url // ""), host: ((.audioItem?.stream?.url // "") | capture("^(?<h>https?://[^/]+)")?.h // ""), token: (.audioItem?.stream?.token // "")})'
+                    return 0
+                  fi
+                  sleep 2
+                done
+              fi
+              echo "No simulation id or not ready; backing off 15s..."
+              sleep 15
+            done
+            echo "::error title=Simulation failed::Could not obtain a successful simulation result after retries for input: $INPUT"
+            return 1
+          }
+          attempt_sim "ask pod bot to play Morning Brew"
 
       - name: Report CodeCommit dev HEAD
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'

@@ -8,7 +8,12 @@
       "intents": [
         {
           "name": "PlayPodcastIntent",
-          "slots": [],
+          "slots": [
+            {
+              "name": "podcast",
+              "type": "AMAZON.SearchQuery"
+            }
+          ],
           "samples": [
             "play morning brew",
             "play morning brew daily",
@@ -17,7 +22,10 @@
             "play podcast",
             "start morning brew",
             "start the podcast",
-            "play morning brew podcast"
+            "play morning brew podcast",
+            "play {podcast}",
+            "play the latest {podcast}",
+            "to play {podcast}"
           ]
         },
         {

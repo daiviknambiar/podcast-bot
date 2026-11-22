@@ -570,6 +570,12 @@ const PlayPodcastIntentHandler = {
     return intentName === 'PlayPodcastIntent';
   },
   async handle(handlerInput) {
+    // Optional slot 'podcast' (defaults to Morning Brew)
+    try {
+      const p = Alexa.getSlotValue(handlerInput.requestEnvelope, 'podcast') || '';
+      if (!p) { console.log('PlayPodcastIntent: empty podcast slot, defaulting to Morning Brew'); }
+      else { console.log('PlayPodcastIntent: podcast slot received:', String(p).slice(0, 80)); }
+    } catch {}
     const attributesManager = handlerInput.attributesManager;
     const state = await getState(attributesManager);
     try {
@@ -605,11 +611,28 @@ const PlayPodcastIntentHandler = {
       await saveState(attributesManager, newState);
 
       const directive = buildPlayDirective(finalUrl, token, resumeOffset);
-      return handlerInput.responseBuilder
+      const response = handlerInput.responseBuilder
         .speak(resumeOffset > 0 ? 'Resuming Morning Brew Daily.' : 'Playing the latest Morning Brew Daily.')
         .addDirective(directive)
         .withShouldEndSession(true)
         .getResponse();
+      // Log outgoing response envelope (truncate and redact query strings)
+      try {
+        const clone = JSON.parse(JSON.stringify(response));
+        if (Array.isArray(clone.directives)) {
+          for (const d of clone.directives) {
+            if (d && d.type === 'AudioPlayer.Play' && d.audioItem && d.audioItem.stream && typeof d.audioItem.stream.url === 'string') {
+              const u = new URL(d.audioItem.stream.url);
+              d.audioItem.stream.url = `${u.protocol}//${u.host}${u.pathname}`;
+            }
+          }
+        }
+        const out = JSON.stringify(clone).slice(0, 500);
+        console.log('PlayPodcast response (truncated):', out);
+      } catch (e) {
+        console.log('PlayPodcast response log error:', (e && e.message) || String(e));
+      }
+      return response;
     } catch (err) {
       console.error('PlayPodcast error:', err);
       return handlerInput.responseBuilder
@@ -915,6 +938,16 @@ const SessionEndedRequestHandler = {
     return Alexa.getRequestType(handlerInput.requestEnvelope) === 'SessionEndedRequest';
   },
   handle(handlerInput) {
+    try {
+      const req = handlerInput.requestEnvelope?.request || {};
+      const reason = req.reason || '<none>';
+      const err = req.error || {};
+      const errType = err.type || '<none>';
+      const errMsg = err.message || '<none>';
+      console.log('SessionEndedRequest:', 'reason=', reason, 'error.type=', errType, 'error.message=', errMsg);
+    } catch (e) {
+      console.log('SessionEnded log error:', (e && e.message) || String(e));
+    }
     return handlerInput.responseBuilder.getResponse();
   }
 };
