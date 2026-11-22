@@ -76,7 +76,26 @@ jobs:
           PODBOT_WEBHOOK_KEY: ${{ secrets.PODBOT_WEBHOOK_KEY }}
           PODBOT_AUTH_HEADER: ${{ secrets.PODBOT_AUTH_HEADER }}
         run: |
-          node -e "const fs=require('fs');const t=v=>(String(v||'').trim().replace(/^['\"]|['\"]$/g,''));const data={GEMINI_API_KEY:t(process.env.GEMINI_API_KEY),OPENAI_API_KEY:t(process.env.OPENAI_API_KEY),PODBOT_WEBHOOK_URL:t(process.env.PODBOT_WEBHOOK_URL),PODBOT_WEBHOOK_KEY:t(process.env.PODBOT_WEBHOOK_KEY),PODBOT_AUTH_HEADER:t(process.env.PODBOT_AUTH_HEADER||'Authorization')};const lines=['module.exports = {'];for(const[k,v]of Object.entries(data)){lines.push(`  ${k}: ${JSON.stringify(v)},`);}lines.push('};');fs.mkdirSync('lambda',{recursive:true});fs.writeFileSync('lambda/gemini-key.js',lines.join('\n'));const lens=Object.fromEntries(Object.entries(data).map(([k,v])=>[k,(v||'').length]));console.log(Object.entries(lens).map(([k,v])=>`${k}=${v}`).join(' '));"
+          node - <<'NODE'
+          const fs = require('fs');
+          const trim = (v) => String(v || '').trim().replace(/^['"]|['"]$/g, '');
+          const data = {
+            GEMINI_API_KEY: trim(process.env.GEMINI_API_KEY),
+            OPENAI_API_KEY: trim(process.env.OPENAI_API_KEY),
+            PODBOT_WEBHOOK_URL: trim(process.env.PODBOT_WEBHOOK_URL),
+            PODBOT_WEBHOOK_KEY: trim(process.env.PODBOT_WEBHOOK_KEY),
+            PODBOT_AUTH_HEADER: trim(process.env.PODBOT_AUTH_HEADER || 'Authorization'),
+          };
+          const lines = ['module.exports = {'];
+          for (const [k, v] of Object.entries(data)) {
+            lines.push(`  ${k}: ${JSON.stringify(v)},`);
+          }
+          lines.push('};');
+          fs.mkdirSync('lambda', { recursive: true });
+          fs.writeFileSync('lambda/gemini-key.js', lines.join('\n'));
+          const lens = Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v || '').length]));
+          console.log(Object.entries(lens).map(([k, v]) => `${k}=${v}`).join(' '));
+          NODE
           git add -f lambda/gemini-key.js
           git commit -m "deploy: inject runtime secrets [throwaway]"
 
