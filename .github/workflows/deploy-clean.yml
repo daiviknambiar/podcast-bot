@@ -179,3 +179,38 @@ jobs:
           else
             echo "lambda/gemini-key.js: missing"
           fi
+
+      - name: Update interaction model (en-US) via SMAPI
+        run: |
+          echo "Submitting en-US interaction model..."
+          ask smapi set-interaction-model \
+            -s "$SKILL_ID" \
+            -g development \
+            -l en-US \
+            --interaction-model "file:skill-package/interactionModels/custom/en-US.json" \
+            --profile default
+
+      - name: Wait for en-US model build to succeed
+        run: |
+          echo "Waiting for interaction model build (en-US)..."
+          ATTEMPTS=0
+          MAX_ATTEMPTS=30
+          while :; do
+            STATUS_JSON="$(ask smapi get-skill-status -s "$SKILL_ID" --profile default)"
+            STATUS="$(printf "%s" "$STATUS_JSON" | jq -r '.interactionModel["en-US"].lastUpdateRequest.status // empty')"
+            echo "Current status: ${STATUS:-unknown}"
+            if [ "$STATUS" = "SUCCEEDED" ]; then
+              echo "Interaction model build SUCCEEDED."
+              break
+            fi
+            if [ "$STATUS" = "FAILED" ]; then
+              echo "::error title=Interaction model build failed::$(printf "%s" "$STATUS_JSON" | jq -r '.interactionModel["en-US"].lastUpdateRequest.errors // [] | tostring')"
+              exit 1
+            fi
+            ATTEMPTS=$((ATTEMPTS+1))
+            if [ $ATTEMPTS -ge $MAX_ATTEMPTS ]; then
+              echo "::error title=Interaction model build timeout::Did not reach SUCCEEDED after $((MAX_ATTEMPTS*5)) seconds."
+              exit 1
+            fi
+            sleep 5
+          done
