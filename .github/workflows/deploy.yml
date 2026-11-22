@@ -101,7 +101,7 @@ jobs:
         run: |
           DEP_BRANCH="ci/alexa-deploy-${GITHUB_SHA}"
           git checkout -b "$DEP_BRANCH"
-          node -e "const fs=require('fs');const esc=s=>String(s||'').replace(/'/g,\"\\\\'\");const wall=esc(process.env.PODBOT_WEBHOOK_URL);const wkey=esc(process.env.PODBOT_WEBHOOK_KEY);const g=esc(process.env.GEMINI_API_KEY);const o=esc(process.env.OPENAI_API_KEY);let out='module.exports = {\\n'; if (g) out+= '  GEMINI_API_KEY: \\''+g+'\\',\\n'; if (o) out+= '  OPENAI_API_KEY: \\''+o+'\\',\\n'; if (wall) out+= '  PODBOT_WEBHOOK_URL: \\''+wall+'\\',\\n'; if (wkey) out+= '  PODBOT_WEBHOOK_KEY: \\''+wkey+'\\',\\n'; out+= '  PODBOT_AUTH_HEADER: \\''+'Authorization'+'\\'\\n};'; fs.writeFileSync('lambda/gemini-key.js',out);"
+          node -e "const fs=require('fs');const trimEsc=s=>String(s||'').trim().replace(/[\\r\\n]/g,'').replace(/'/g,\"\\\\'\");const wall=trimEsc(process.env.PODBOT_WEBHOOK_URL);const wkey=trimEsc(process.env.PODBOT_WEBHOOK_KEY);const g=trimEsc(process.env.GEMINI_API_KEY);const o=trimEsc(process.env.OPENAI_API_KEY);let out='module.exports = {\\n'; if (g) out+= '  GEMINI_API_KEY: \\''+g+'\\',\\n'; if (o) out+= '  OPENAI_API_KEY: \\''+o+'\\',\\n'; if (wall) out+= '  PODBOT_WEBHOOK_URL: \\''+wall+'\\',\\n'; if (wkey) out+= '  PODBOT_WEBHOOK_KEY: \\''+wkey+'\\',\\n'; out+= '  PODBOT_AUTH_HEADER: \\''+'Authorization'+'\\'\\n};'; fs.writeFileSync('lambda/gemini-key.js',out);"
           git add -f lambda/gemini-key.js
           git commit -m "ci: add secrets file for hosted deploy (CI-only)"
           # Confirm config file presence (without revealing values)
@@ -186,11 +186,11 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          CANDIDATES=("models/gemini-2.5-flash" "models/gemini-flash-lite-latest" "models/gemini-2.5-flash-lite" "models/gemini-3.8-flash")
+          CANDIDATES=("models/gemini-2.5-flash-lite" "models/gemini-2.5-flash" "models/gemini-flash-lite-latest" "models/gemini-3.8-flash")
           for M in "${CANDIDATES[@]}"; do
             URL="https://generativelanguage.googleapis.com/v1beta/models/${M#models/}:generateContent"
             BODY='{"contents":[{"role":"user","parts":[{"text":"ping"}]}],"generationConfig":{"maxOutputTokens":1,"temperature":0}}'
-            STATUS=$(curl -sS -m 2.2 -w "%{http_code}" -o /tmp/m.out -H "x-goog-api-key: '"$GEMINI_API_KEY"'" -H "Content-Type: application/json" -X POST -d "$BODY" "$URL" || true)
+            STATUS=$(curl -sS -m 2.2 -w "%{http_code}" -o /tmp/m.out -H "x-goog-api-key: ${GEMINI_API_KEY}" -H "Content-Type: application/json" -X POST -d "$BODY" "$URL" || true)
             MSG=$(jq -r '.error.message? // .candidates[0].finishReason? // empty' /tmp/m.out 2>/dev/null | head -c 160)
             echo "$M -> $STATUS ${MSG:+- $MSG}"
           done

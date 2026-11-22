@@ -445,20 +445,20 @@ async function callGeminiAnswer({ question, audioBase64, notes, model = GEMINI_M
 }
 
 async function getAnswer({ question, audioBase64, notes }) {
-  // Prefer OpenAI when key is present
-  if (OPENAI_API_KEY) {
-    try {
-      return await callOpenAIAnswer({ question, notes, model: OPENAI_MODEL });
-    } catch (e) {
-      console.error('OpenAI chain failed', (e && e.message) || String(e));
-    }
-  }
-  // Fallback to Gemini when key present
+  // Prefer Gemini (grounding off) when key is present
   if (GEMINI_API_KEY) {
     try {
       return await callGeminiAnswer({ question, audioBase64, notes, model: GEMINI_MODEL });
     } catch (e) {
       console.error('Gemini chain failed', (e && e.message) || String(e));
+    }
+  }
+  // Fallback to OpenAI when key present
+  if (OPENAI_API_KEY) {
+    try {
+      return await callOpenAIAnswer({ question, notes, model: OPENAI_MODEL });
+    } catch (e) {
+      console.error('OpenAI chain failed', (e && e.message) || String(e));
     }
   }
   throw new Error('No provider configured');
