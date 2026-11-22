@@ -321,10 +321,37 @@ jobs:
           echo "Logging interceptor in origin/dev lambda/index.js:"
           git show origin/dev:lambda/index.js | grep -n 'LoggingRequestInterceptor' || true
 
-      - name: Update manifest via SMAPI (development; print 400 body)
+      - name: Fetch live manifest (development)
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
+        id: get_manifest
         run: |
-          FILE="skill-package/skill.json"
+          ask smapi get-skill-manifest -s "$SKILL_ID" --stage development --profile default > live-manifest.json || echo '{}' > live-manifest.json
+          echo "Live apis.custom block:"
+          jq -r '.manifest.apis.custom // {}' live-manifest.json
+
+      - name: Decide if manifest update is needed (preserve endpoint)
+        if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
+        id: decide_manifest
+        run: |
+          HAS_ENDPOINT="$(jq -r '((.manifest.apis.custom.endpoint.uri? // \"\")|tostring) | length > 0' live-manifest.json)"
+          HAS_AUDIO="$(jq -r '(.manifest.apis.custom.interfaces // [] | map(.type) | index(\"AUDIO_PLAYER\")) != null' live-manifest.json)"
+          echo "has_endpoint=${HAS_ENDPOINT}" >> "$GITHUB_OUTPUT"
+          echo "has_audio_player=${HAS_AUDIO}" >> "$GITHUB_OUTPUT"
+          if [ "$HAS_ENDPOINT" = "true" ] && [ "$HAS_AUDIO" = "true" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Manifest already has endpoint and AUDIO_PLAYER; will skip update."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Manifest update required (endpoint or AUDIO_PLAYER missing)."
+          fi
+
+      - name: Merge and update manifest (only if needed)
+        if: (steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success') && steps.decide_manifest.outputs.skip != 'true'
+        id: update_manifest
+        run: |
+          node -e "const fs=require('fs');const live=JSON.parse(fs.readFileSync('live-manifest.json','utf8'));const local=JSON.parse(fs.readFileSync('skill-package/skill.json','utf8'));const m=live.manifest||{};m.apis=m.apis||{};m.apis.custom=m.apis.custom||{};const ac=m.apis.custom; if(!ac.endpoint||!ac.endpoint.uri){const src=(((local||{}).manifest||{}).apis||{}).custom||{}; if(src.endpoint&&src.endpoint.uri){ac.endpoint=src.endpoint;} } if(!ac.regions){const src=(((local||{}).manifest||{}).apis||{}).custom||{}; if(src.regions){ac.regions=src.regions;} } ac.interfaces=(ac.interfaces||[]); if(!ac.interfaces.some(x=>x&&x.type==='AUDIO_PLAYER')) ac.interfaces.push({type:'AUDIO_PLAYER'}); live.manifest=m; fs.writeFileSync('merged-manifest.json',JSON.stringify(live,null,2));"
+          echo "Prepared merged manifest (endpoint preserved/added as needed)."
+          FILE="merged-manifest.json"
           set +e
           OUT_STD="$(mktemp)"; OUT_ERR="$(mktemp)"
           ask smapi update-skill-manifest -s "$SKILL_ID" --stage development --manifest "file:$FILE" --profile default 1>"$OUT_STD" 2>"$OUT_ERR"
@@ -348,14 +375,13 @@ jobs:
                 echo "::error title=Manifest update failed::Raw SMAPI PUT did not return 202. See body above."
                 exit 1
               fi
-            else
-              echo "::error title=Token error::Could not obtain access token to fetch full 400 body."
-              exit 1
+            } else
+              then echo \"::error title=Token error::Could not obtain access token to fetch full 400 body.\"; exit 1
             fi
           fi
 
-      - name: Poll manifest build status (fail on error)
-        if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
+      - name: Poll manifest build status (only if updated)
+        if: (steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success') && steps.decide_manifest.outputs.skip != 'true'
         run: |
           n=0
           until [ $n -ge 24 ]; do
@@ -373,6 +399,18 @@ jobs:
             n=$((n+1))
             sleep 5
           done
+
+      - name: Guard: verify endpoint present after (or without) update
+        if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
+        run: |
+          ask smapi get-skill-manifest -s "$SKILL_ID" --stage development --profile default > live-manifest-post.json || echo '{}' > live-manifest-post.json
+          EP_URI="$(jq -r '.manifest.apis.custom.endpoint.uri? // empty' live-manifest-post.json)"
+          echo "Live apis.custom block (post):"
+          jq -r '.manifest.apis.custom // {}' live-manifest-post.json
+          if [ -z "$EP_URI" ]; then
+            echo "::error title=Endpoint missing::Live manifest has no apis.custom.endpoint.uri"
+            exit 1
+          fi
 
       - name: Update interaction model via SMAPI (en-US; print 400 body)
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
