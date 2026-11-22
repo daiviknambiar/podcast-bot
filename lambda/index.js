@@ -81,7 +81,7 @@ function httpRequest(options, bodyBuffer, { timeoutMs = 6000, maxRedirects = 10 
   });
 }
 
-async function httpGet(url, headers = {}, timeoutMs = 6000, maxRedirects = 5) {
+async function httpGet(url, headers = {}, timeoutMs = 6000, maxRedirects = 10) {
   const u = new URL(url);
   const options = {
     protocol: u.protocol,
@@ -94,7 +94,7 @@ async function httpGet(url, headers = {}, timeoutMs = 6000, maxRedirects = 5) {
   return httpRequest(options, null, { timeoutMs, maxRedirects });
 }
 
-async function httpHead(url, headers = {}, timeoutMs = 6000, maxRedirects = 5) {
+async function httpHead(url, headers = {}, timeoutMs = 6000, maxRedirects = 10) {
   const u = new URL(url);
   const options = {
     protocol: u.protocol,
@@ -286,7 +286,7 @@ async function fetchMp3Range(url, startByte, endByteInclusive) {
     'User-Agent': 'PodcastBot/1.0',
     Range: `bytes=${startByte}-${endByteInclusive}`
   };
-  const res = await httpGet(url, headers, 6500, 5);
+  const res = await httpGet(url, headers, 6500, 10);
   if (res.statusCode !== 206 && res.statusCode !== 200) throw new Error(`Range HTTP ${res.statusCode}`);
   return res.body;
 }
@@ -704,30 +704,54 @@ async function handleOpenQuestion(handlerInput, questionFromUser) {
         .reprompt('What would you like to know?')
         .getResponse();
     }
+    // Helper: time-bound any async step
+    const withTimeout = (p, ms, label) => {
+      let t;
+      return Promise.race([
+        new Promise((_, rej) => { t = setTimeout(() => rej(new Error(`${label} timed out`)), ms); }),
+        p.finally(() => { if (t) clearTimeout(t); })
+      ]);
+    };
     let audioBase64 = null;
     if (url) {
       // Try to include last ~75s snippet for context and ~90s upcoming
-      const id3Size = state.id3Size ?? 0;
-      const bytesPerSecond = state.bytesPerSecond ?? (await probeMp3Metadata(url)).bytesPerSecond;
-      const lookbackMs = (LOOKBACK_SECONDS || 75) * 1000;
-      const startMs = Math.max(0, (offsetMs || 0) - lookbackMs);
-      const startByte = id3Size + Math.max(0, Math.floor((startMs / 1000) * bytesPerSecond));
-      const endByte = startByte + Math.max(2048, Math.floor((lookbackMs / 1000) * bytesPerSecond)) - 1;
-      const rangeBuf = await fetchMp3Range(url, startByte, endByte);
-      const trimmed = trimToFrameSync(rangeBuf);
-      const recentB64 = trimmed.toString('base64');
-      let upcomingB64 = null;
       try {
-        const aheadSeconds = 90;
-        const startByte2 = id3Size + Math.max(0, Math.floor(((offsetMs || 0) / 1000) * bytesPerSecond));
-        const endByte2 = startByte2 + Math.max(2048, Math.floor(aheadSeconds * bytesPerSecond)) - 1;
-        const futureBuf = await fetchMp3Range(url, startByte2, endByte2);
-        const futureTrim = trimToFrameSync(futureBuf);
-        upcomingB64 = futureTrim.toString('base64');
-      } catch {}
-      audioBase64 = { recent: recentB64, upcoming: upcomingB64 };
+        const id3Size = state.id3Size ?? 0;
+        let bytesPerSecond = state.bytesPerSecond ?? null;
+        if (!bytesPerSecond) {
+          try {
+            const meta = await withTimeout(probeMp3MetadataImpl(url), 2000, 'probeMp3Metadata');
+            if (meta && typeof meta.bytesPerSecond === 'number') bytesPerSecond = meta.bytesPerSecond;
+          } catch (e) {
+            console.log('Q&A: probe skipped:', (e && e.message) || String(e));
+          }
+        }
+        if (!bytesPerSecond) throw new Error('no bytesPerSecond');
+        const lookbackMs = (LOOKBACK_SECONDS || 75) * 1000;
+        const startMs = Math.max(0, (offsetMs || 0) - lookbackMs);
+        const startByte = id3Size + Math.max(0, Math.floor((startMs / 1000) * bytesPerSecond));
+        const endByte = startByte + Math.max(2048, Math.floor((lookbackMs / 1000) * bytesPerSecond)) - 1;
+        const rangeBuf = await withTimeout(fetchMp3Range(url, startByte, endByte), 2000, 'fetchMp3Range');
+        const trimmed = trimToFrameSync(rangeBuf);
+        const recentB64 = trimmed.toString('base64');
+        let upcomingB64 = null;
+        try {
+          const aheadSeconds = 90;
+          const startByte2 = id3Size + Math.max(0, Math.floor(((offsetMs || 0) / 1000) * bytesPerSecond));
+          const endByte2 = startByte2 + Math.max(2048, Math.floor(aheadSeconds * bytesPerSecond)) - 1;
+          const futureBuf = await withTimeout(fetchMp3Range(url, startByte2, endByte2), 2000, 'fetchMp3Range2');
+          const futureTrim = trimToFrameSync(futureBuf);
+          upcomingB64 = futureTrim.toString('base64');
+        } catch (e2) {
+          console.log('Q&A: upcoming snippet skipped:', (e2 && e2.message) || String(e2));
+        }
+        audioBase64 = { recent: recentB64, upcoming: upcomingB64 };
+      } catch (e) {
+        console.log('Q&A: audio snippet skipped:', (e && e.message) || String(e));
+      }
     }
-    answer = await getAnswer({
+    const answerCaller = (typeof global.__overrideGetAnswer === 'function') ? global.__overrideGetAnswer : getAnswer;
+    answer = await answerCaller({
       question: qText,
       audioBase64,
       notes: state.lastNotes || ''
@@ -1121,11 +1145,16 @@ async function tryPostAndMaybeClear(state, reason) {
 
 // ---------- Test helpers (only enabled under NODE_ENV=test) ----------
 if (process.env.NODE_ENV === 'test') {
-  module.exports._handlers = { PlayPodcastIntentHandler };
+  module.exports._handlers = { PlayPodcastIntentHandler, OpenQuestionIntentHandler };
   module.exports._setPlayImpls = (impls = {}) => {
     if (impls.fetchFeedFirstItem) fetchFeedFirstItemImpl = impls.fetchFeedFirstItem;
     if (impls.resolveFinalMp3Url) resolveFinalMp3UrlImpl = impls.resolveFinalMp3Url;
     if (impls.probeMp3Metadata) probeMp3MetadataImpl = impls.probeMp3Metadata;
+  };
+  module.exports._setQAImpls = (impls = {}) => {
+    if (typeof impls.getAnswer === 'function') {
+      try { global.__overrideGetAnswer = impls.getAnswer; } catch {}
+    }
   };
 }
 
