@@ -101,7 +101,14 @@ jobs:
 
       - name: "Validate written key lengths (fail if GEMINI_API_KEY empty)"
         run: |
-          node -e "const fs=require('fs');const m=require('./lambda/gemini-key.js');const lens=Object.fromEntries(Object.entries(m).map(([k,v])=>[k,(String(v||'')).length]));console.log(Object.entries(lens).map(([k,v])=>`${k}=${v}`).join(' ')); if(!m.GEMINI_API_KEY || String(m.GEMINI_API_KEY).length===0){process.exitCode=2;}"
+          node - <<'NODE'
+          const m = require('./lambda/gemini-key.js');
+          const lens = Object.fromEntries(Object.entries(m).map(([k, v]) => [k, String(v || '').length]));
+          console.log(Object.entries(lens).map(([k, v]) => `${k}=${v}`).join(' '));
+          if (!m.GEMINI_API_KEY || String(m.GEMINI_API_KEY).length === 0) {
+            process.exitCode = 2;
+          }
+          NODE
 
       - name: "List repository secrets (names only)"
         continue-on-error: true
