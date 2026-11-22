@@ -89,7 +89,15 @@ jobs:
 
       - name: Validate ASK connectivity (get skill status)
         run: |
-          ask smapi get-skill-status -s "$SKILL_ID" --profile default >/dev/null 2>&1 || { echo "::error title=ASK CLI auth failed::Ensure ASK_REFRESH_TOKEN and ASK_VENDOR_ID are valid for skill $SKILL_ID."; exit 1; }
+          tries=0
+          until ask smapi get-skill-status -s "$SKILL_ID" --profile default >/dev/null 2>&1; do
+            tries=$((tries+1))
+            if [ $tries -ge 3 ]; then
+              echo "::error title=ASK CLI auth failed::Ensure ASK_REFRESH_TOKEN and ASK_VENDOR_ID are valid for skill $SKILL_ID."
+              exit 1
+            fi
+            sleep $((tries*2))
+          done
           echo "ASK connectivity OK."
 
       - name: Configure Git user
