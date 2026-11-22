@@ -57,6 +57,8 @@ function httpRequest(options, bodyBuffer, { timeoutMs = 6000, maxRedirects = 5 }
             method: opts.method,
             headers: opts.headers || {}
           };
+          // Ensure current response is drained to avoid socket hangups
+          try { res.resume(); } catch {}
           doReq(nextOpts, redirectsLeft - 1);
           return;
         }
@@ -66,6 +68,7 @@ function httpRequest(options, bodyBuffer, { timeoutMs = 6000, maxRedirects = 5 }
           const buf = Buffer.concat(chunks);
           resolve({ statusCode: res.statusCode, headers: res.headers, body: buf, redirects: visited });
         });
+        res.on('error', (e) => reject(e));
       });
       req.on('error', reject);
       req.setTimeout(timeoutMs, () => {
@@ -151,14 +154,30 @@ async function fetchFeedFirstItem(feedUrl) {
         return;
       }
       let xml = '';
+      let done = false;
       res.setEncoding('utf8');
       res.on('data', (chunk) => {
         xml += chunk;
         if (xml.toLowerCase().includes('</item>')) {
-          res.destroy(); // stop reading further
+          // Resolve immediately with the first item parsed to avoid waiting for 'end'
+          if (!done) {
+            done = true;
+            try {
+              const item = parseRssFirstItem(xml);
+              if (!item) {
+                reject(new Error('No item found in RSS'));
+              } else {
+                resolve(item);
+              }
+            } catch (e) {
+              reject(e);
+            }
+          }
+          try { res.destroy(); } catch {}
         }
       });
       res.on('end', () => {
+        if (done) return;
         const item = parseRssFirstItem(xml);
         if (!item) {
           reject(new Error('No item found in RSS'));
@@ -166,6 +185,7 @@ async function fetchFeedFirstItem(feedUrl) {
           resolve(item);
         }
       });
+      res.on('error', (e) => { if (!done) reject(e); });
     });
     req.on('error', reject);
     req.setTimeout(6000, () => req.destroy(new Error('Feed request timed out')));
@@ -582,18 +602,50 @@ const PlayPodcastIntentHandler = {
       else { console.log('PlayPodcastIntent: podcast slot received:', String(p).slice(0, 80)); }
     } catch {}
     const attributesManager = handlerInput.attributesManager;
+    console.log('PlayPodcast: before getState');
     const state = await getState(attributesManager);
+    console.log('PlayPodcast: after getState');
     try {
+      console.log('PlayPodcast: before fetchFeedFirstItem', FEED_URL);
       const item = await fetchFeedFirstItemImpl(FEED_URL);
+      console.log('PlayPodcast: after fetchFeedFirstItem — title:', (item && item.title || '').slice(0, 120));
       if (!item || !item.enclosureUrl) {
         throw new Error('Feed item missing enclosure');
       }
-      const { finalUrl } = await resolveFinalMp3UrlImpl(item.enclosureUrl);
-      const meta = await probeMp3MetadataImpl(finalUrl);
+      // Resolve final URL with an overall timeout; fall back to original enclosure
+      async function timeoutAfter(ms, label) {
+        return new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out`)), ms));
+      }
+      console.log('PlayPodcast: before resolveFinalMp3Url');
+      let finalUrl = item.enclosureUrl;
+      try {
+        const out = await Promise.race([
+          resolveFinalMp3UrlImpl(item.enclosureUrl),
+          timeoutAfter(4000, 'resolveFinalMp3Url')
+        ]);
+        if (out && out.finalUrl) finalUrl = out.finalUrl;
+        console.log('PlayPodcast: after resolveFinalMp3Url');
+      } catch (e) {
+        console.log('PlayPodcast: resolveFinalMp3Url failed, using enclosure URL:', (e && e.message) || String(e));
+      }
+      // Probe metadata with timeout; fall back to defaults
+      console.log('PlayPodcast: before probeMp3Metadata');
+      let meta = { id3Size: 0, bitrateKbps: 128, bytesPerSecond: Math.round((128 * 1000) / 8) };
+      try {
+        const out = await Promise.race([
+          probeMp3MetadataImpl(finalUrl),
+          timeoutAfter(4000, 'probeMp3Metadata')
+        ]);
+        if (out && typeof out.bytesPerSecond === 'number') meta = out;
+        console.log('PlayPodcast: after probeMp3Metadata');
+      } catch (e) {
+        console.log('PlayPodcast: probeMp3Metadata failed, using defaults:', (e && e.message) || String(e));
+      }
       const token = item.guid || item.title || finalUrl;
 
       // Flush pending batch if switching episodes
       if (state.lastUrl && state.lastUrl !== finalUrl && Array.isArray(state.questionsPending) && state.questionsPending.length > 0) {
+        console.log('PlayPodcast: flushing pending questions on episode change');
         await tryPostAndMaybeClear(state, 'episodeChange');
         await saveState(attributesManager, state);
       }
@@ -613,7 +665,9 @@ const PlayPodcastIntentHandler = {
         bytesPerSecond: meta.bytesPerSecond,
         lastOffsetMs: resumeOffset
       };
+      console.log('PlayPodcast: before saveState');
       await saveState(attributesManager, newState);
+      console.log('PlayPodcast: after saveState');
 
       try {
         const host = new URL(finalUrl).host;
