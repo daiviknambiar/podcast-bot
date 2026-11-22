@@ -336,7 +336,7 @@ jobs:
           Promise.resolve(skill._answerForSmoke(q)).then((txt) => {
             const ms = Date.now() - start;
             const t = String(txt || '').replace(/\\s+/g,' ').trim();
-            if (!t) { console.log(`ANSWER_SMOKE: empty latencyMs=${ms}`); process.exit(1); }
+            if (!t || /took too long/i.test(t)) { console.log(`ANSWER_SMOKE: timeout-or-empty latencyMs=${ms} text=${JSON.stringify(t)}`); process.exit(1); }
             console.log(`ANSWER_SMOKE: ok latencyMs=${ms} text=${JSON.stringify(t.slice(0,120))}`);
           }).catch((e) => {
             const ms = Date.now() - start;

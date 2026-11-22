@@ -1423,7 +1423,7 @@ if (process.env.NODE_ENV === 'test') {
 }
 // CI helper: ungrounded quick answer call (no secrets printed)
 module.exports._answerForSmoke = async (q) => {
-  const txt = await getAnswer({ question: q, audioBase64: null, notes: '', hint: q, budgetMs: 2500, preferGrounding: false });
+  const txt = await getAnswer({ question: q, audioBase64: null, notes: '', hint: q, budgetMs: 3500, preferGrounding: false });
   return String(txt || '').slice(0, 200);
 };
 
