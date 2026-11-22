@@ -1,0 +1,116 @@
+name: Deploy Alexa Hosted Skill (clean)
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      SKILL_ID: amzn1.ask.skill.8731ea2f-6df5-4445-a307-582ff944ab13
+      ASK_REFRESH_TOKEN: ${{ secrets.ASK_REFRESH_TOKEN }}
+      ASK_VENDOR_ID: ${{ secrets.ASK_VENDOR_ID }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install ASK CLI and jq
+        run: |
+          npm i -g ask-cli@2
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Prepare Lambda dependencies
+        working-directory: lambda
+        run: npm install --omit=dev
+
+      - name: Node syntax check
+        run: node --check lambda/index.js
+
+      - name: Create ASK CLI profile config (~/.ask/cli_config)
+        env:
+          ASK_REFRESH_TOKEN: ${{ secrets.ASK_REFRESH_TOKEN }}
+          ASK_VENDOR_ID: ${{ secrets.ASK_VENDOR_ID }}
+        run: |
+          mkdir -p "${HOME}/.ask"
+          node -e "const fs=require('fs');const p=require('path');const cfg={profiles:{default:{vendor_id:process.env.ASK_VENDOR_ID,token:{access_token:'',refresh_token:process.env.ASK_REFRESH_TOKEN,token_type:'bearer',expires_in:0,expires_at:'1970-01-01T00:00:00.000Z'},code:{default:{src:'lambda'}},skillMetadata:{src:'skill-package'},skillInfrastructure:{type:'@ask-cli/hosted-skill-deployer'}}}};fs.writeFileSync(p.join(process.env.HOME,'.ask','cli_config'),JSON.stringify(cfg));"
+          echo "ASK profile written."
+
+      - name: Validate ASK connectivity (get skill status)
+        run: |
+          ask smapi get-skill-status -s "$SKILL_ID" --profile default >/dev/null 2>&1 || { echo "::error title=ASK CLI auth failed::Check ASK_REFRESH_TOKEN and ASK_VENDOR_ID."; exit 1; }
+          echo "ASK connectivity OK."
+
+      - name: Resolve Alexa Hosted repository URL
+        id: hosted
+        run: |
+          REPO_URL="$(ask smapi get-alexa-hosted-skill-metadata -s "$SKILL_ID" --profile default | jq -r '.alexaHosted.repository.url')"
+          if [ -z "$REPO_URL" ] || [ "$REPO_URL" = "null" ]; then
+            echo "::error title=Hosted repo not found::Could not obtain Alexa Hosted repository URL for $SKILL_ID."
+            exit 1
+          fi
+          echo "repo_url=$REPO_URL" >> "$GITHUB_OUTPUT"
+          echo "Hosted repo URL resolved."
+
+      - name: Configure Git credential helper for ASK
+        run: git config --global credential.helper '!ask util git-credentials-helper'
+
+      - name: Push to Alexa Hosted via helper
+        id: push_helper
+        continue-on-error: true
+        env:
+          REPO_URL: ${{ steps.hosted.outputs.repo_url }}
+        run: |
+          git remote add alexa "$REPO_URL" || git remote set-url alexa "$REPO_URL"
+          set -e
+          echo "Pushing to CodeCommit master..."
+          GIT_TRACE=0 git push --force alexa HEAD:master
+          echo "Pushing to CodeCommit dev..."
+          GIT_TRACE=0 git push --force alexa HEAD:dev
+
+      - name: Fallback push via generated credentials
+        id: push_fallback
+        if: steps.push_helper.outcome == 'failure'
+        env:
+          REPO_URL: ${{ steps.hosted.outputs.repo_url }}
+        run: |
+          CREDS_JSON="$(ask smapi generate-credentials-for-alexa-hosted-skill -s "$SKILL_ID" --repository-url "$REPO_URL" --repository-type GIT --profile default || true)"
+          USERNAME="$(printf "%s" "$CREDS_JSON" | jq -r '..|.username? // .userName? // empty' | head -n1)"
+          PASSWORD="$(printf "%s" "$CREDS_JSON" | jq -r '..|.password? // .pass? // empty' | head -n1)"
+          if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
+            echo "::error title=Hosted credentials error::Could not parse credentials."
+            exit 1
+          fi
+          echo "::add-mask::$USERNAME"
+          echo "::add-mask::$PASSWORD"
+          BASIC="$(printf "%s:%s" "$USERNAME" "$PASSWORD" | base64 | tr -d '\n')"
+          GIT_TRACE=0 git -c credential.helper= -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" push --force alexa HEAD:master
+          GIT_TRACE=0 git -c credential.helper= -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" push --force alexa HEAD:dev
+
+      - name: Verify CodeCommit dev and grep PlayPodcast fix
+        if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
+        env:
+          REPO_URL: ${{ steps.hosted.outputs.repo_url }}
+        run: |
+          CREDS_JSON="$(ask smapi generate-credentials-for-alexa-hosted-skill -s "$SKILL_ID" --repository-url "$REPO_URL" --repository-type GIT --profile default || true)"
+          USERNAME="$(printf "%s" "$CREDS_JSON" | jq -r '..|.username? // .userName? // empty' | head -n1)"
+          PASSWORD="$(printf "%s" "$CREDS_JSON" | jq -r '..|.password? // .pass? // empty' | head -n1)"
+          echo "::add-mask::$USERNAME"
+          echo "::add-mask::$PASSWORD"
+          BASIC="$(printf "%s:%s" "$USERNAME" "$PASSWORD" | base64 | tr -d '\n')"
+          echo "::add-mask::$BASIC"
+          rm -rf alexa-verify
+          git -c credential.helper= -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" clone "$REPO_URL" alexa-verify
+          cd alexa-verify
+          git -c credential.helper= -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" fetch origin
+          echo "origin/dev    HEAD: $(git log -1 --format=%H origin/dev || true)"
+          echo "PlayPodcast fix (grep) in origin/dev lambda/index.js:"
+          git show origin/dev:lambda/index.js | grep -n 'PlayPodcast resolved:' || true
