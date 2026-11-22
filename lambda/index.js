@@ -486,6 +486,8 @@ async function getAnswer({ question, audioBase64, notes }) {
       console.error('OpenAI chain failed', (e && e.message) || String(e));
     }
   }
+  // Neither provider configured
+  console.error('Answer provider unavailable: GEMINI_API_KEY missing and OPENAI_API_KEY missing');
   return 'Sorry, I could not analyze that just now.';
 }
 

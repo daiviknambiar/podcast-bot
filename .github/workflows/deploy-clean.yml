@@ -63,6 +63,18 @@ jobs:
       - name: Configure Git credential helper for ASK
         run: git config --global credential.helper '!ask util git-credentials-helper'
 
+      - name: "Write lambda/gemini-key.js (throwaway deploy commit)"
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PODBOT_WEBHOOK_URL: ${{ secrets.PODBOT_WEBHOOK_URL }}
+          PODBOT_WEBHOOK_KEY: ${{ secrets.PODBOT_WEBHOOK_KEY }}
+          PODBOT_AUTH_HEADER: ${{ secrets.PODBOT_AUTH_HEADER }}
+        run: |
+          node -e "const fs=require('fs');const t=v=>(String(v||'').trim().replace(/^['\"]|['\"]$/g,''));const data={GEMINI_API_KEY:t(process.env.GEMINI_API_KEY),OPENAI_API_KEY:t(process.env.OPENAI_API_KEY),PODBOT_WEBHOOK_URL:t(process.env.PODBOT_WEBHOOK_URL),PODBOT_WEBHOOK_KEY:t(process.env.PODBOT_WEBHOOK_KEY),PODBOT_AUTH_HEADER:t(process.env.PODBOT_AUTH_HEADER||'Authorization')};const lines=['module.exports = {'];for(const[k,v]of Object.entries(data)){lines.push(`  ${k}: ${JSON.stringify(v)},`);}lines.push('};');fs.mkdirSync('lambda',{recursive:true});fs.writeFileSync('lambda/gemini-key.js',lines.join('\n'));"
+          git add -f lambda/gemini-key.js
+          git commit -m "deploy: inject runtime secrets [throwaway]" || true
+
       - name: Push to Alexa Hosted via helper
         id: push_helper
         continue-on-error: true
@@ -114,3 +126,11 @@ jobs:
           echo "origin/dev    HEAD: $(git log -1 --format=%H origin/dev || true)"
           echo "PlayPodcast fix (grep) in origin/dev lambda/index.js:"
           git show origin/dev:lambda/index.js | grep -n 'PlayPodcast resolved:' || true
+          echo "Key file check on origin/dev:"
+          if git show origin/dev:lambda/gemini-key.js >/tmp/gemini-key.js 2>/dev/null; then
+            echo "lambda/gemini-key.js: present"
+            LEN=$(node -e "const fs=require('fs');const d=fs.readFileSync('/tmp/gemini-key.js','utf8');const m=d.match(/GEMINI_API_KEY:\\s*['\\\"]([^'\\\"]*)['\\\"]/);const v=(m&&m[1])?m[1].trim():'';console.log(v.length);")
+            echo "GEMINI_API_KEY length: $LEN"
+          else
+            echo "lambda/gemini-key.js: missing"
+          fi

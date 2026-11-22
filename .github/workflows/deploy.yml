@@ -1,8 +1,907 @@
 name: Deploy Alexa Hosted Skill
 
 on:
-  push:
-    branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      send_test_batch:
+        description: "Send a test webhook batch after deploy"
+        required: false
+        default: "false"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      SKILL_ID: amzn1.ask.skill.8731ea2f-6df5-4445-a307-582ff944ab13
+      ASK_REFRESH_TOKEN: ${{ secrets.ASK_REFRESH_TOKEN }}
+      ASK_VENDOR_ID: ${{ secrets.ASK_VENDOR_ID }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      PODBOT_WEBHOOK_URL: ${{ secrets.PODBOT_WEBHOOK_URL }}
+      PODBOT_WEBHOOK_KEY: ${{ secrets.PODBOT_WEBHOOK_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify required secrets
+        run: |
+          missing=0
+          if [ -z "$ASK_REFRESH_TOKEN" ]; then
+            echo "::error title=Missing secret::ASK_REFRESH_TOKEN is required."
+            missing=1
+          fi
+          if [ -z "$ASK_VENDOR_ID" ]; then
+            echo "::error title=Missing secret::ASK_VENDOR_ID is required."
+            missing=1
+          fi
+          if [ "$missing" -ne 0 ]; then exit 1; fi
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "::warning title=Optional secret missing::GEMINI_API_KEY not set; Q&A will not work until you add it."
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install ASK CLI and jq
+        run: |
+          npm i -g ask-cli@2
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Prepare Lambda dependencies
+        working-directory: lambda
+        run: npm install --omit=dev
+
+      - name: Node syntax check
+        run: node --check lambda/index.js
+
+      - name: Create ASK CLI profile config (~/.ask/cli_config)
+        env:
+          ASK_REFRESH_TOKEN: ${{ secrets.ASK_REFRESH_TOKEN }}
+          ASK_VENDOR_ID: ${{ secrets.ASK_VENDOR_ID }}
+        run: |
+          mkdir -p "${HOME}/.ask"
+          node -e "const fs=require('fs');const p=require('path');const cfg={profiles:{default:{vendor_id:process.env.ASK_VENDOR_ID,token:{access_token:'',refresh_token:process.env.ASK_REFRESH_TOKEN,token_type:'bearer',expires_in:0,expires_at:'1970-01-01T00:00:00.000Z'},code:{default:{src:'lambda'}},skillMetadata:{src:'skill-package'},skillInfrastructure:{type:'@ask-cli/hosted-skill-deployer'}}}};fs.writeFileSync(p.join(process.env.HOME,'.ask','cli_config'),JSON.stringify(cfg));"
+          echo "ASK profile written."
+
+      - name: Validate ASK connectivity (get skill status)
+        run: |
+          tries=0
+          until ask smapi get-skill-status -s "$SKILL_ID" --profile default >/dev/null 2>&1; do
+            tries=$((tries+1))
+            if [ $tries -ge 3 ]; then
+              echo "::error title=ASK CLI auth failed::Ensure ASK_REFRESH_TOKEN and ASK_VENDOR_ID are valid for skill $SKILL_ID."
+              exit 1
+            fi
+            sleep $((tries*2))
+          done
+          echo "ASK connectivity OK."
+
+      - name: Configure Git user
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Prepare CI-only branch with secrets file (not pushed to GitHub)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PODBOT_WEBHOOK_URL: ${{ secrets.PODBOT_WEBHOOK_URL }}
+          PODBOT_WEBHOOK_KEY: ${{ secrets.PODBOT_WEBHOOK_KEY }}
+        run: |
+          DEP_BRANCH="ci/alexa-deploy-${GITHUB_SHA}"
+          git checkout -b "$DEP_BRANCH"
+          node -e "const fs=require('fs');const trimEsc=s=>String(s||'').trim().replace(/[\\r\\n]/g,'').replace(/'/g,\"\\\\'\");const wall=trimEsc(process.env.PODBOT_WEBHOOK_URL);const wkey=trimEsc(process.env.PODBOT_WEBHOOK_KEY);const g=trimEsc(process.env.GEMINI_API_KEY);const o=trimEsc(process.env.OPENAI_API_KEY);let out='module.exports = {\\n'; if (g) out+= '  GEMINI_API_KEY: \\''+g+'\\',\\n'; if (o) out+= '  OPENAI_API_KEY: \\''+o+'\\',\\n'; if (wall) out+= '  PODBOT_WEBHOOK_URL: \\''+wall+'\\',\\n'; if (wkey) out+= '  PODBOT_WEBHOOK_KEY: \\''+wkey+'\\',\\n'; out+= '  PODBOT_AUTH_HEADER: \\''+'Authorization'+'\\'\\n};'; fs.writeFileSync('lambda/gemini-key.js',out);"
+          git add -f lambda/gemini-key.js
+          git commit -m "ci: add secrets file for hosted deploy (CI-only)"
+
+      - name: Resolve Alexa Hosted repository URL
+        id: hosted
+        run: |
+          REPO_URL="$(ask smapi get-alexa-hosted-skill-metadata -s "$SKILL_ID" --profile default | jq -r '.alexaHosted.repository.url')"
+          if [ -z "$REPO_URL" ] || [ "$REPO_URL" = "null" ]; then
+            echo "::error title=Hosted repo not found::Could not obtain Alexa Hosted repository URL for $SKILL_ID."
+            exit 1
+          fi
+          echo "repo_url=$REPO_URL" >> "$GITHUB_OUTPUT"
+          echo "Hosted repo URL resolved."
+
+      - name: Configure Git credential helper for ASK
+        run: |
+          git config --global credential.helper '!ask util git-credentials-helper'
+
+      - name: Push to Alexa Hosted via helper
+        id: push_helper
+        continue-on-error: true
+        env:
+          REPO_URL: ${{ steps.hosted.outputs.repo_url }}
+        run: |
+          git remote add alexa "$REPO_URL" || git remote set-url alexa "$REPO_URL"
+          set -e
+          echo "Pushing to CodeCommit master..."
+          GIT_TRACE=0 git push --force alexa HEAD:master
+          echo "Pushing to CodeCommit dev..."
+          GIT_TRACE=0 git push --force alexa HEAD:dev
+
+      - name: Fallback push via credential-store
+        id: push_fallback
+        if: "${{ steps.push_helper.outcome == 'failure' }}"
+        env:
+          REPO_URL: ${{ steps.hosted.outputs.repo_url }}
+        run: |
+          tries=0
+          while :; do
+            tries=$((tries+1))
+            CREDS_JSON="$(ask smapi generate-credentials-for-alexa-hosted-skill -s "$SKILL_ID" --repository-url "$REPO_URL" --repository-type GIT --profile default || true)"
+            if [ -n "$CREDS_JSON" ] && echo "$CREDS_JSON" | jq -e . >/dev/null 2>&1; then
+              break
+            fi
+            if [ $tries -ge 4 ]; then
+              echo "::error title=Hosted credentials error::Failed to obtain credentials after $tries attempts."
+              exit 1
+            fi
+            sleep $((tries*2))
+          done
+          USERNAME="$(printf "%s" "$CREDS_JSON" | jq -r '..|.username? // .userName? // empty' | head -n1)"
+          PASSWORD="$(printf "%s" "$CREDS_JSON" | jq -r '..|.password? // .pass? // empty' | head -n1)"
+          if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
+            echo "::error title=Hosted credentials error::Could not parse username/password from SMAPI response."
+            exit 1
+          fi
+          echo "::add-mask::$USERNAME"
+          echo "::add-mask::$PASSWORD"
+          CRED_FILE="$(mktemp)"
+          {
+            echo "url=$REPO_URL"
+            echo "username=$USERNAME"
+            echo "password=$PASSWORD"
+          } | git -c credential.helper="store --file $CRED_FILE" credential-store store
+          if ! GIT_TRACE=0 git -c credential.helper= -c credential.helper="store --file $CRED_FILE" push --force alexa HEAD:master; then
+            BASIC="$(printf "%s:%s" "$USERNAME" "$PASSWORD" | base64 | tr -d '\n')"
+            echo "::add-mask::$BASIC"
+            GIT_TRACE=0 git -c credential.helper= -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" push --force alexa HEAD:master
+          fi
+          if ! GIT_TRACE=0 git -c credential.helper= -c credential.helper="store --file $CRED_FILE" push --force alexa HEAD:dev; then
+            BASIC="$(printf "%s:%s" "$USERNAME" "$PASSWORD" | base64 | tr -d '\n')"
+            echo "::add-mask::$BASIC"
+            GIT_TRACE=0 git -c credential.helper= -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" push --force alexa HEAD:dev
+          fi
+
+      - name: Verify CodeCommit heads and config
+        if: "${{ steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success' }}"
+        env:
+          REPO_URL: ${{ steps.hosted.outputs.repo_url }}
+        run: |
+          CREDS_JSON="$(ask smapi generate-credentials-for-alexa-hosted-skill -s "$SKILL_ID" --repository-url "$REPO_URL" --repository-type GIT --profile default || true)"
+          USERNAME="$(printf "%s" "$CREDS_JSON" | jq -r '..|.username? // .userName? // empty' | head -n1)"
+          PASSWORD="$(printf "%s" "$CREDS_JSON" | jq -r '..|.password? // .pass? // empty' | head -n1)"
+          echo "::add-mask::$USERNAME"
+          echo "::add-mask::$PASSWORD"
+          BASIC="$(printf "%s:%s" "$USERNAME" "$PASSWORD" | base64 | tr -d '\n')"
+          echo "::add-mask::$BASIC"
+          CRED_FILE="$(mktemp)"
+          {
+            echo "url=$REPO_URL"
+            echo "username=$USERNAME"
+            echo "password=$PASSWORD"
+          } | git -c credential.helper="store --file $CRED_FILE" credential-store store
+          rm -rf alexa-verify
+          git -c credential.helper= -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" clone "$REPO_URL" alexa-verify
+          cd alexa-verify
+          git -c credential.helper= -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" fetch origin
+          echo "origin/master HEAD: $(git log -1 --format=%H origin/master || true)"
+          echo "origin/dev    HEAD: $(git log -1 --format=%H origin/dev || true)"
+          echo "GEMINI lines in origin/dev lambda/config.js:"
+          git show origin/dev:lambda/config.js | grep -n GEMINI || true
+          echo "Logging interceptor in origin/dev lambda/index.js:"
+          git show origin/dev:lambda/index.js | grep -n 'LoggingRequestInterceptor' || true
+          echo "PlayPodcast fix presence in origin/dev lambda/index.js:"
+          git show origin/dev:lambda/index.js | grep -n 'PlayPodcast resolved:' || true
+
+      - name: Fetch live manifest (development)
+        if: "${{ steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success' }}"
+        id: get_manifest
+        run: |
+          ask smapi get-skill-manifest -s "$SKILL_ID" --stage development --profile default > live-manifest.json || echo '{}' > live-manifest.json
+          echo "Live apis.custom block:"
+          jq -r '.manifest.apis.custom // {}' live-manifest.json
+
+      - name: "Guard: verify endpoint present"
+        if: "${{ steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success' }}"
+        run: |
+          EP_URI="$(jq -r '.manifest.apis.custom.endpoint.uri? // empty' live-manifest.json)"
+          if [ -z "$EP_URI" ]; then
+            echo "::error title=Endpoint missing::Live manifest has no apis.custom.endpoint.uri"
+            exit 1
+          fi
+          echo "Endpoint OK: $EP_URI"
+
+      - name: Report CodeCommit dev HEAD (final)
+        if: "${{ steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success' }}"
+        env:
+          REPO_URL: ${{ steps.hosted.outputs.repo_url }}
+        run: |
+          CREDS_JSON="$(ask smapi generate-credentials-for-alexa-hosted-skill -s "$SKILL_ID" --repository-url "$REPO_URL" --repository-type GIT --profile default || true)"
+          USERNAME="$(printf "%s" "$CREDS_JSON" | jq -r '..|.username? // .userName? // empty' | head -n1)"
+          PASSWORD="$(printf "%s" "$CREDS_JSON" | jq -r '..|.password? // .pass? // empty' | head -n1)"
+          echo "::add-mask::$USERNAME"
+          echo "::add-mask::$PASSWORD"
+          BASIC="$(printf "%s:%s" "$USERNAME" "$PASSWORD" | base64 | tr -d '\n')"
+          SHA="$(git -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" ls-remote "$REPO_URL" dev | awk '{print $1}')"
+          echo "CodeCommit dev HEAD: ${SHA:-<unknown>}"
+*** End of File
+name: Deploy Alexa Hosted Skill
+
+on:
+  workflow_dispatch:
+    inputs:
+      send_test_batch:
+        description: "Send a test webhook batch after deploy"
+        required: false
+        default: "false"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      SKILL_ID: amzn1.ask.skill.8731ea2f-6df5-4445-a307-582ff944ab13
+      ASK_REFRESH_TOKEN: ${{ secrets.ASK_REFRESH_TOKEN }}
+      ASK_VENDOR_ID: ${{ secrets.ASK_VENDOR_ID }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      PODBOT_WEBHOOK_URL: ${{ secrets.PODBOT_WEBHOOK_URL }}
+      PODBOT_WEBHOOK_KEY: ${{ secrets.PODBOT_WEBHOOK_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify required secrets
+        run: |
+          missing=0
+          if [ -z "$ASK_REFRESH_TOKEN" ]; then
+            echo "::error title=Missing secret::ASK_REFRESH_TOKEN is required. See README for how to obtain it."
+            missing=1
+          fi
+          if [ -z "$ASK_VENDOR_ID" ]; then
+            echo "::error title=Missing secret::ASK_VENDOR_ID is required. See README for where to find it."
+            missing=1
+          fi
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "::warning title=Optional secret missing::GEMINI_API_KEY not set; AskAboutIntent will not work until you add it."
+          fi
+          # Report webhook secret presence (without values)
+          if [ -n "$PODBOT_WEBHOOK_URL" ]; then
+            echo "PODBOT_WEBHOOK_URL: set"
+          else
+            echo "PODBOT_WEBHOOK_URL: missing"
+          fi
+          if [ -n "$PODBOT_WEBHOOK_KEY" ]; then
+            echo "PODBOT_WEBHOOK_KEY: set"
+          else
+            echo "PODBOT_WEBHOOK_KEY: missing"
+          fi
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install ASK CLI and jq
+        run: |
+          npm i -g ask-cli@2
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Prepare Lambda dependencies
+        working-directory: lambda
+        run: npm install --omit=dev
+
+      - name: Node syntax check
+        run: node --check lambda/index.js
+
+      - name: Run unit test for PlayPodcastIntent (empty slot)
+        continue-on-error: true
+        working-directory: lambda
+        run: node scripts/test-play.js
+
+      - name: Create ASK CLI profile config (~/.ask/cli_config)
+        env:
+          ASK_REFRESH_TOKEN: ${{ secrets.ASK_REFRESH_TOKEN }}
+          ASK_VENDOR_ID: ${{ secrets.ASK_VENDOR_ID }}
+        run: |
+          mkdir -p "${HOME}/.ask"
+          node -e "const fs=require('fs');const p=require('path');const cfg={profiles:{default:{vendor_id:process.env.ASK_VENDOR_ID,token:{access_token:'',refresh_token:process.env.ASK_REFRESH_TOKEN,token_type:'bearer',expires_in:0,expires_at:'1970-01-01T00:00:00.000Z'},code:{default:{src:'lambda'}},skillMetadata:{src:'skill-package'},skillInfrastructure:{type:'@ask-cli/hosted-skill-deployer'}}}};fs.writeFileSync(p.join(process.env.HOME,'.ask','cli_config'),JSON.stringify(cfg));"
+          echo "ASK profile written."
+
+      - name: Validate ASK connectivity (get skill status)
+        run: |
+          tries=0
+          until ask smapi get-skill-status -s "$SKILL_ID" --profile default >/dev/null 2>&1; do
+            tries=$((tries+1))
+            if [ $tries -ge 3 ]; then
+              echo "::error title=ASK CLI auth failed::Ensure ASK_REFRESH_TOKEN and ASK_VENDOR_ID are valid for skill $SKILL_ID."
+              exit 1
+            fi
+            sleep $((tries*2))
+          done
+          echo "ASK connectivity OK."
+
+      - name: Configure Git user
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Prepare CI-only branch with secrets file (not pushed to GitHub)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PODBOT_WEBHOOK_URL: ${{ secrets.PODBOT_WEBHOOK_URL }}
+          PODBOT_WEBHOOK_KEY: ${{ secrets.PODBOT_WEBHOOK_KEY }}
+        run: |
+          DEP_BRANCH="ci/alexa-deploy-${GITHUB_SHA}"
+          git checkout -b "$DEP_BRANCH"
+          node -e "const fs=require('fs');const trimEsc=s=>String(s||'').trim().replace(/[\\r\\n]/g,'').replace(/'/g,\"\\\\'\");const wall=trimEsc(process.env.PODBOT_WEBHOOK_URL);const wkey=trimEsc(process.env.PODBOT_WEBHOOK_KEY);const g=trimEsc(process.env.GEMINI_API_KEY);const o=trimEsc(process.env.OPENAI_API_KEY);let out='module.exports = {\\n'; if (g) out+= '  GEMINI_API_KEY: \\''+g+'\\',\\n'; if (o) out+= '  OPENAI_API_KEY: \\''+o+'\\',\\n'; if (wall) out+= '  PODBOT_WEBHOOK_URL: \\''+wall+'\\',\\n'; if (wkey) out+= '  PODBOT_WEBHOOK_KEY: \\''+wkey+'\\',\\n'; out+= '  PODBOT_AUTH_HEADER: \\''+'Authorization'+'\\'\\n};'; fs.writeFileSync('lambda/gemini-key.js',out);"
+          git add -f lambda/gemini-key.js
+          git commit -m "ci: add secrets file for hosted deploy (CI-only)"
+          # Confirm config file presence (without revealing values)
+          if [ -f lambda/gemini-key.js ]; then
+            echo "gemini-key.js: present"
+            (grep -q "PODBOT_WEBHOOK_URL" lambda/gemini-key.js && echo "webhook url entry: present") || echo "webhook url entry: missing"
+            (grep -q "PODBOT_WEBHOOK_KEY" lambda/gemini-key.js && echo "webhook key entry: present") || echo "webhook key entry: missing"
+          else
+            echo "gemini-key.js: missing"
+          fi
+
+      - name: List Gemini models supporting generateContent
+        id: gemini_models
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "GEMINI_API_KEY not set; skipping model list."
+            exit 0
+          fi
+          MODELS_JSON="$(curl -s -H "x-goog-api-key: $GEMINI_API_KEY" "https://generativelanguage.googleapis.com/v1beta/models" || true)"
+          if [ -z "$MODELS_JSON" ]; then
+            echo "Could not retrieve models list."
+            exit 0
+          fi
+          echo "Available models (generateContent):"
+          echo "$MODELS_JSON" | jq -r '.models[]? | select((.supportedGenerationMethods // []) | index("generateContent")) | .name' | sort -u
+
+      - name: List OpenAI models (names only)
+        if: "${{ env.OPENAI_API_KEY != '' }}"
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          curl -s -H "Authorization: Bearer $OPENAI_API_KEY" https://api.openai.com/v1/models | jq -r '.data[]?.id' | sort -u | head -n 200
+
+      - name: Auto-set OpenAI primary and fallback (CI-only)
+        if: "${{ env.OPENAI_API_KEY != '' }}"
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          LIST="$(curl -s -H "Authorization: Bearer $OPENAI_API_KEY" https://api.openai.com/v1/models | jq -r '.data[]?.id' | sort -u)"
+          choose() { echo "$LIST" | grep -qx "$1"; }
+          PRIMARY=""
+          FALLBACK=""
+          if choose "gpt-4.1-nano"; then PRIMARY="gpt-4.1-nano"; fi
+          if [ -z "$PRIMARY" ] && choose "gpt-4o-mini"; then PRIMARY="gpt-4o-mini"; fi
+          if [ -z "$PRIMARY" ] && choose "gpt-5-nano"; then PRIMARY="gpt-5-nano"; fi
+          if [ -z "$PRIMARY" ] && choose "gpt-5-mini"; then PRIMARY="gpt-5-mini"; fi
+          # fallback = next cheapest present different from PRIMARY
+          for c in gpt-4.1-nano gpt-4o-mini gpt-5-nano gpt-5-mini; do
+            if [ "$c" != "$PRIMARY" ] && echo "$LIST" | grep -qx "$c"; then FALLBACK="$c"; break; fi
+          done
+          if [ -n "$PRIMARY" ]; then
+            sed -i -E "s#OPENAI_MODEL:\\s*'[^']*'#OPENAI_MODEL: '${PRIMARY}'#g" lambda/config.js
+            if grep -q 'OPENAI_FALLBACK_MODELS' lambda/config.js; then
+              if [ -n "$FALLBACK" ]; then
+                sed -i -E "s#OPENAI_FALLBACK_MODELS:\\s*\\[[^\\]]*\\]#OPENAI_FALLBACK_MODELS: ['${FALLBACK}']#g" lambda/config.js
+              fi
+            fi
+            git add lambda/config.js
+            if ! git diff --cached --quiet; then
+              git commit -m "ci: set OpenAI primary to ${PRIMARY}${FALLBACK:+ and fallback to ${FALLBACK}}"
+            fi
+          fi
+
+      - name: Probe OpenAI candidate models
+        if: "${{ env.OPENAI_API_KEY != '' }}"
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          CANDIDATES=("gpt-4.1-nano" "gpt-4o-mini" "gpt-5-nano" "gpt-5-mini")
+          for M in "${CANDIDATES[@]}"; do
+            BODY='{"model":"'"$M"'","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}'
+            STATUS=$(curl -sS -m 2.5 -w "%{http_code}" -o /tmp/o.out -H "Authorization: Bearer $OPENAI_API_KEY" -H "Content-Type: application/json" -X POST -d "$BODY" https://api.openai.com/v1/chat/completions || true)
+            TYPE=$(jq -r '.error.type? // .object? // empty' /tmp/o.out 2>/dev/null | head -c 120)
+            echo "$M -> $STATUS ${TYPE:+- $TYPE}"
+          done
+
+      # Probe candidate models to see which have quota (no grounding, 1-token)
+      - name: Probe Gemini candidate models
+        if: "${{ env.GEMINI_API_KEY != '' }}"
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          CANDIDATES=("models/gemini-2.5-flash-lite" "models/gemini-2.5-flash" "models/gemini-flash-lite-latest" "models/gemini-3.8-flash")
+          for M in "${CANDIDATES[@]}"; do
+            URL="https://generativelanguage.googleapis.com/v1beta/models/${M#models/}:generateContent"
+            BODY='{"contents":[{"role":"user","parts":[{"text":"ping"}]}],"generationConfig":{"maxOutputTokens":1,"temperature":0}}'
+            STATUS=$(curl -sS -m 2.2 -w "%{http_code}" -o /tmp/m.out -H "x-goog-api-key: ${GEMINI_API_KEY}" -H "Content-Type: application/json" -X POST -d "$BODY" "$URL" || true)
+            MSG=$(jq -r '.error.message? // .candidates[0].finishReason? // empty' /tmp/m.out 2>/dev/null | head -c 160)
+            echo "$M -> $STATUS ${MSG:+- $MSG}"
+          done
+
+      - name: E2E Gemini primary probe (why is the sky blue)
+        if: "${{ env.GEMINI_API_KEY != '' }}"
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          MODEL="models/gemini-flash-lite-latest"
+          URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL#models/}:generateContent"
+          PROMPT="You are PodBot, an assistant that answers spoken questions clearly in 2–4 short sentences. No markdown."
+          BODY="$(jq -c -n --arg sys "$PROMPT" --arg q "Question: why is the sky blue" '{contents:[{role:"user",parts:[{text:($sys+" "+$q)}]}],generationConfig:{maxOutputTokens:180,temperature:0.2}}')"
+          START=$(date +%s%3N || true)
+          STATUS=$(curl -sS -m 5.0 -w "%{http_code}" -o /tmp/e2e.out -H "x-goog-api-key: ${GEMINI_API_KEY}" -H "Content-Type: application/json" -X POST -d "$BODY" "$URL" || true)
+          END=$(date +%s%3N || true)
+          LAT=$((END-START))
+          TXT="$(jq -r '.candidates[0].content.parts[]?.text? // empty' /tmp/e2e.out 2>/dev/null | tr '\n' ' ' | sed -E 's/  +/ /g' | head -c 80)"
+          ERR="$(jq -r '.error.message? // empty' /tmp/e2e.out 2>/dev/null | head -c 120)"
+          STATUS="${STATUS:-000}"
+          LAT="${LAT:-?}"
+          if [ -n "$TXT" ]; then SNIP="$TXT"; else SNIP="$ERR"; fi
+          echo "E2E: $MODEL -> $STATUS, $LAT ms, ${SNIP}"
+
+      - name: Resolve Alexa Hosted repository URL
+        id: hosted
+        run: |
+          REPO_URL="$(ask smapi get-alexa-hosted-skill-metadata -s "$SKILL_ID" --profile default | jq -r '.alexaHosted.repository.url')"
+          if [ -z "$REPO_URL" ] || [ "$REPO_URL" = "null" ]; then
+            echo "::error title=Hosted repo not found::Could not obtain Alexa Hosted repository URL for $SKILL_ID."
+            exit 1
+          fi
+          echo "repo_url=$REPO_URL" >> "$GITHUB_OUTPUT"
+          echo "Hosted repo URL resolved."
+
+      - name: Configure Git credential helper for ASK
+        run: |
+          git config --global credential.helper '!ask util git-credentials-helper'
+
+      - name: Push to Alexa Hosted via helper
+        id: push_helper
+        continue-on-error: true
+        env:
+          REPO_URL: ${{ steps.hosted.outputs.repo_url }}
+        run: |
+          git remote add alexa "$REPO_URL" || git remote set-url alexa "$REPO_URL"
+          set -e
+          echo "Pushing to CodeCommit master..."
+          GIT_TRACE=0 git push --force alexa HEAD:master
+          echo "Pushing to CodeCommit dev..."
+          GIT_TRACE=0 git push --force alexa HEAD:dev
+
+      - name: Fallback push via credential-store
+        id: push_fallback
+        if: "${{ steps.push_helper.outcome == 'failure' }}"
+        env:
+          REPO_URL: ${{ steps.hosted.outputs.repo_url }}
+        run: |
+          # Generate short-lived credentials with retry for transient SMAPI errors
+          tries=0
+          while :; do
+            tries=$((tries+1))
+            CREDS_JSON="$(ask smapi generate-credentials-for-alexa-hosted-skill -s "$SKILL_ID" --repository-url "$REPO_URL" --repository-type GIT --profile default || true)"
+            if [ -n "$CREDS_JSON" ] && echo "$CREDS_JSON" | jq -e . >/dev/null 2>&1; then
+              break
+            fi
+            if [ $tries -ge 4 ]; then
+              echo "::error title=Hosted credentials error::Failed to obtain credentials after $tries attempts."
+              exit 1
+            fi
+            sleep $((tries*2))
+          done
+          USERNAME="$(printf "%s" "$CREDS_JSON" | jq -r '..|.username? // .userName? // empty' | head -n1)"
+          PASSWORD="$(printf "%s" "$CREDS_JSON" | jq -r '..|.password? // .pass? // empty' | head -n1)"
+          if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
+            echo "::error title=Hosted credentials error::Could not parse username/password from SMAPI response."
+            exit 1
+          fi
+          echo "::add-mask::$USERNAME"
+          echo "::add-mask::$PASSWORD"
+          # Build credential-store file scoped to this host/path
+          CRED_FILE="$(mktemp)"
+          {
+            echo "url=$REPO_URL"
+            echo "username=$USERNAME"
+            echo "password=$PASSWORD"
+          } | git -c credential.helper="store --file $CRED_FILE" credential-store store
+          # Push using only this temporary credential store (override global helper)
+          if ! GIT_TRACE=0 git -c credential.helper= -c credential.helper="store --file $CRED_FILE" push --force alexa HEAD:master; then
+            # Second-chance: use Authorization header inline without printing secrets
+            BASIC="$(printf "%s:%s" "$USERNAME" "$PASSWORD" | base64 | tr -d '\n')"
+            echo "::add-mask::$BASIC"
+            GIT_TRACE=0 git -c credential.helper= -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" push --force alexa HEAD:master
+          fi
+          # Always push dev as well
+          if ! GIT_TRACE=0 git -c credential.helper= -c credential.helper="store --file $CRED_FILE" push --force alexa HEAD:dev; then
+            BASIC="$(printf "%s:%s" "$USERNAME" "$PASSWORD" | base64 | tr -d '\n')"
+            echo "::add-mask::$BASIC"
+            GIT_TRACE=0 git -c credential.helper= -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" push --force alexa HEAD:dev
+          fi
+
+      - name: Verify CodeCommit heads and config
+        if: "${{ steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success' }}"
+        env:
+          REPO_URL: ${{ steps.hosted.outputs.repo_url }}
+        run: |
+          CREDS_JSON="$(ask smapi generate-credentials-for-alexa-hosted-skill -s "$SKILL_ID" --repository-url "$REPO_URL" --repository-type GIT --profile default || true)"
+          USERNAME="$(printf "%s" "$CREDS_JSON" | jq -r '..|.username? // .userName? // empty' | head -n1)"
+          PASSWORD="$(printf "%s" "$CREDS_JSON" | jq -r '..|.password? // .pass? // empty' | head -n1)"
+          echo "::add-mask::$USERNAME"
+          echo "::add-mask::$PASSWORD"
+          BASIC="$(printf "%s:%s" "$USERNAME" "$PASSWORD" | base64 | tr -d '\n')"
+          echo "::add-mask::$BASIC"
+          CRED_FILE="$(mktemp)"
+          {
+            echo "url=$REPO_URL"
+            echo "username=$USERNAME"
+            echo "password=$PASSWORD"
+          } | git -c credential.helper="store --file $CRED_FILE" credential-store store
+          rm -rf alexa-verify
+          git -c credential.helper= -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" clone "$REPO_URL" alexa-verify
+          cd alexa-verify
+          git -c credential.helper= -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" fetch origin
+          echo "origin/master HEAD: $(git log -1 --format=%H origin/master || true)"
+          echo "origin/dev    HEAD: $(git log -1 --format=%H origin/dev || true)"
+          echo "GEMINI lines in origin/dev lambda/config.js:"
+          git show origin/dev:lambda/config.js | grep -n GEMINI || true
+          echo "Logging interceptor in origin/dev lambda/index.js:"
+          git show origin/dev:lambda/index.js | grep -n 'LoggingRequestInterceptor' || true
+          echo "PlayPodcast fix presence in origin/dev lambda/index.js:"
+          git show origin/dev:lambda/index.js | grep -n 'PlayPodcast resolved:' || true
+
+      - name: Fetch live manifest (development)
+        if: "${{ steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success' }}"
+        id: get_manifest
+        run: |
+          ask smapi get-skill-manifest -s "$SKILL_ID" --stage development --profile default > live-manifest.json || echo '{}' > live-manifest.json
+          echo "Live apis.custom block:"
+          jq -r '.manifest.apis.custom // {}' live-manifest.json
+
+      - name: Decide if manifest update is needed (preserve endpoint)
+        if: "${{ steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success' }}"
+        id: decide_manifest
+        run: |
+          HAS_ENDPOINT="$(jq -r '((.manifest.apis.custom.endpoint.uri? // "")|tostring) | length > 0' live-manifest.json)"
+          HAS_AUDIO="$(jq -r '(.manifest.apis.custom.interfaces // [] | map(.type) | index("AUDIO_PLAYER")) != null' live-manifest.json)"
+          echo "has_endpoint=${HAS_ENDPOINT}" >> "$GITHUB_OUTPUT"
+          echo "has_audio_player=${HAS_AUDIO}" >> "$GITHUB_OUTPUT"
+          if [ "$HAS_ENDPOINT" = "true" ] && [ "$HAS_AUDIO" = "true" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Manifest already has endpoint and AUDIO_PLAYER; will skip update."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Manifest update required (endpoint or AUDIO_PLAYER missing)."
+          fi
+
+      - name: Merge and update manifest (only if needed)
+        if: "${{ (steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success') && steps.decide_manifest.outputs.skip != 'true' }}"
+        id: update_manifest
+        run: |
+          node -e "const fs=require('fs');const live=JSON.parse(fs.readFileSync('live-manifest.json','utf8'));const local=JSON.parse(fs.readFileSync('skill-package/skill.json','utf8'));const m=live.manifest||{};m.apis=m.apis||{};m.apis.custom=m.apis.custom||{};const ac=m.apis.custom; if(!ac.endpoint||!ac.endpoint.uri){const src=(((local||{}).manifest||{}).apis||{}).custom||{}; if(src.endpoint&&src.endpoint.uri){ac.endpoint=src.endpoint;} } if(!ac.regions){const src=(((local||{}).manifest||{}).apis||{}).custom||{}; if(src.regions){ac.regions=src.regions;} } ac.interfaces=(ac.interfaces||[]); if(!ac.interfaces.some(x=>x&&x.type==='AUDIO_PLAYER')) ac.interfaces.push({type:'AUDIO_PLAYER'}); live.manifest=m; fs.writeFileSync('merged-manifest.json',JSON.stringify(live,null,2));"
+          echo "Prepared merged manifest (endpoint preserved/added as needed)."
+          FILE="merged-manifest.json"
+          set +e
+          OUT_STD="$(mktemp)"; OUT_ERR="$(mktemp)"
+          ask smapi update-skill-manifest -s "$SKILL_ID" --stage development --manifest "file:$FILE" --profile default 1>"$OUT_STD" 2>"$OUT_ERR"
+          RET=$?
+          set -e
+          if [ $RET -ne 0 ]; then
+            echo "::warning title=SMAPI update-skill-manifest failed::Printing ASK CLI stderr below."
+            cat "$OUT_ERR" || true
+            echo "Attempting raw SMAPI PUT to capture full 400 body..."
+            TOK_JSON="$(ask util generate-lwa-tokens --no-browser --profile default 2>/dev/null || true)"
+            ACCESS_TOKEN="$(echo "$TOK_JSON" | jq -r '.access_token? // empty')"
+            if [ -n "$ACCESS_TOKEN" ]; then
+              HTTP_STATUS=$(curl -sS -w "%{http_code}" -o /tmp/manifest_body.out -X PUT \
+                -H "Authorization: Bearer $ACCESS_TOKEN" -H "Content-Type: application/json" \
+                --data-binary "@$FILE" \
+                "https://api.amazonalexa.com/v1/skills/${SKILL_ID}/stages/development/manifest" || true)
+              echo "Raw SMAPI PUT (manifest) status: $HTTP_STATUS"
+              echo "Raw SMAPI (manifest) response body:"
+              cat /tmp/manifest_body.out || true
+              if [ "$HTTP_STATUS" != "202" ]; then
+                echo "::error title=Manifest update failed::Raw SMAPI PUT did not return 202. See body above."
+                exit 1
+              fi
+            else
+              echo "::error title=Token error::Could not obtain access token to fetch full 400 body."
+              exit 1
+            fi
+          fi
+
+      - name: Poll manifest build status (only if updated)
+        if: "${{ (steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success') && steps.decide_manifest.outputs.skip != 'true' }}"
+        run: |
+          n=0
+          until [ $n -ge 24 ]; do
+            STATUS_JSON="$(ask smapi get-skill-status -s "$SKILL_ID" --resource manifest --profile default || true)"
+            MAN_STATUS="$(echo "$STATUS_JSON" | jq -r '.manifest.lastUpdateRequest.status? // empty')"
+            echo "Manifest build status: ${MAN_STATUS:-<unknown>}"
+            if [ "$MAN_STATUS" = "SUCCEEDED" ]; then
+              echo "Manifest build SUCCEEDED."
+              break
+            fi
+            if [ "$MAN_STATUS" = "FAILED" ]; then
+              echo "::error title=Manifest build failed::$(echo "$STATUS_JSON" | jq -r '.manifest.lastUpdateRequest.errors? // empty')"
+              exit 1
+            fi
+            n=$((n+1))
+            sleep 5
+          done
+
+      - name: "Guard: verify endpoint present after (or without) update"
+        if: "${{ steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success' }}"
+        run: |
+          ask smapi get-skill-manifest -s "$SKILL_ID" --stage development --profile default > live-manifest-post.json || echo '{}' > live-manifest-post.json
+          EP_URI="$(jq -r '.manifest.apis.custom.endpoint.uri? // empty' live-manifest-post.json)"
+          echo "Live apis.custom block (post):"
+          jq -r '.manifest.apis.custom // {}' live-manifest-post.json
+          if [ -z "$EP_URI" ]; then
+            echo "::error title=Endpoint missing::Live manifest has no apis.custom.endpoint.uri"
+            exit 1
+          fi
+
+      - name: Update interaction model via SMAPI (en-US; print 400 body)
+        if: "${{ steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success' }}"
+        run: |
+          FILE="skill-package/interactionModels/custom/en-US.json"
+          echo "Planned fallbackIntentSensitivity in payload:"
+          jq -r '.interactionModel.languageModel.modelConfiguration.fallbackIntentSensitivity.level? // "<unset>"' "$FILE"
+          set +e
+          OUT_STD="$(mktemp)"; OUT_ERR="$(mktemp)"
+          ask smapi set-interaction-model -s "$SKILL_ID" --stage development --locale en-US --interaction-model "file:$FILE" --profile default 1>"$OUT_STD" 2>"$OUT_ERR"
+          RET=$?
+          set -e
+          if [ $RET -ne 0 ]; then
+            echo "::warning title=SMAPI set-interaction-model failed::Printing ASK CLI stderr (message wrapper) below."
+            cat "$OUT_ERR" || true
+            echo "Attempting raw SMAPI PUT to capture full 400 body..."
+            TOK_JSON="$(ask util generate-lwa-tokens --no-browser --profile default 2>/dev/null || true)"
+            ACCESS_TOKEN="$(echo "$TOK_JSON" | jq -r '.access_token? // empty')"
+            if [ -n "$ACCESS_TOKEN" ]; then
+              HTTP_STATUS=$(curl -sS -w "%{http_code}" -o /tmp/smapi_body.out -X PUT \
+                -H "Authorization: Bearer $ACCESS_TOKEN" -H "Content-Type: application/json" \
+                --data-binary "@$FILE" \
+                "https://api.amazonalexa.com/v1/skills/${SKILL_ID}/stages/development/interactionModel/locales/en-US" || true)
+              echo "Raw SMAPI PUT status: $HTTP_STATUS"
+              echo "Raw SMAPI response body:"
+              cat /tmp/smapi_body.out || true
+              if [ "$HTTP_STATUS" != "202" ]; then
+                echo "::error title=Interaction model update failed::Raw SMAPI PUT did not return 202. See body above."
+                exit 1
+              fi
+            else
+              echo "::error title=Token error::Could not obtain access token to fetch full 400 body."
+              exit 1
+            fi
+          fi
+
+      - name: Poll interaction model build status (fail on error)
+        if: "${{ steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success' }}"
+        run: |
+          n=0
+          until [ $n -ge 24 ]; do
+            STATUS_JSON="$(ask smapi get-skill-status -s "$SKILL_ID" --resource interactionModel --profile default || true)"
+            MODEL_STATUS="$(echo "$STATUS_JSON" | jq -r '.interactionModel.custom["en-US"].lastUpdateRequest.status? // empty')"
+            echo "Model build status: ${MODEL_STATUS:-<unknown>}"
+            if [ "$MODEL_STATUS" = "SUCCEEDED" ]; then
+              echo "Interaction model build SUCCEEDED."
+              break
+            fi
+            if [ "$MODEL_STATUS" = "FAILED" ]; then
+              echo "::error title=Interaction model build failed::$(echo "$STATUS_JSON" | jq -r '.interactionModel.custom["en-US"].lastUpdateRequest.errors? // empty')"
+              exit 1
+            fi
+            n=$((n+1))
+            sleep 5
+          done
+          echo "Final observed model build status: ${MODEL_STATUS:-<unknown>}"
+
+      - name: Wait for model propagation
+        if: "${{ steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success' }}"
+        run: sleep 30
+
+      - name: Confirm invocation name
+        if: "${{ steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success' }}"
+        run: |
+          IM_JSON="$(ask smapi get-interaction-model -s "$SKILL_ID" --stage development --locale en-US --profile default || true)"
+          INVOKATION="$(echo "$IM_JSON" | jq -r '.interactionModel.languageModel.invocationName? // empty')"
+          echo "Current invocation: ${INVOKATION:-<none>}"
+          if [ "$INVOKATION" != "pod bot" ]; then
+            echo "::warning title=Invocation name differs::Observed invocation='$INVOKATION' (expected 'pod bot')."
+          fi
+          echo "Live OpenQuestionIntent block:"
+          echo "$IM_JSON" | jq -r '.interactionModel.languageModel.intents[] | select(.name=="OpenQuestionIntent")'
+          echo "Live fallbackIntentSensitivity level:"
+          echo "$IM_JSON" | jq -r '.interactionModel.languageModel.modelConfiguration.fallbackIntentSensitivity.level? // "<unset>"'
+
+      - name: Check hosted skill deployment status
+        if: "${{ steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success' }}"
+        continue-on-error: true
+        run: |
+          n=0
+          until [ $n -ge 24 ]; do
+            STATUS_JSON="$(ask smapi get-skill-status -s "$SKILL_ID" --resource hostedSkillDeployment,manifest,interactionModel --profile default || true)"
+            echo "$STATUS_JSON" | jq -r '.hostedSkillDeployment.lastUpdateRequest.status? // "UNKNOWN"'
+            HS="$(echo "$STATUS_JSON" | jq -r '.hostedSkillDeployment.lastUpdateRequest.status? // empty')"
+            if [ "$HS" = "SUCCEEDED" ]; then
+              echo "Hosted deployment SUCCEEDED."
+              break
+            fi
+            if [ "$HS" = "FAILED" ]; then
+              echo "::error title=Hosted deployment failed::$(echo "$STATUS_JSON" | jq -r '.hostedSkillDeployment.lastUpdateRequest.errors? // empty')"
+              exit 1
+            fi
+            n=$((n+1))
+            sleep 5
+          done
+          if [ "$HS" != "SUCCEEDED" ]; then
+            echo "::warning title=Hosted deployment status unavailable::Status endpoint returned 400 or unknown; continuing."
+          fi
+
+      - name: List vendor skills and invocations (dev)
+        run: |
+          echo "Listing skills for vendor..."
+          VSKILLS="$(ask smapi list-skills-for-vendor --vendor-id "$ASK_VENDOR_ID" --profile default || true)"
+          echo "$VSKILLS" | jq -r '.skills[]?.skillId' | while read -r SID; do
+            if [ -z "$SID" ]; then continue; fi
+            NAME="$(ask smapi get-skill-manifest -s "$SID" --stage development --profile default 2>/dev/null | jq -r '.manifest.publishingInformation.locales["en-US"].name? // "unknown"')"
+            INV="$(ask smapi get-interaction-model -s "$SID" --stage development --locale en-US --profile default 2>/dev/null | jq -r '.interactionModel.languageModel.invocationName? // "n/a"')"
+            echo "Skill $SID  name=\"$NAME\"  dev invocation=\"$INV\""
+          done
+
+      - name: Optional test webhook POST
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.send_test_batch == 'true' }}
+        env:
+          PODBOT_WEBHOOK_URL: ${{ secrets.PODBOT_WEBHOOK_URL }}
+          PODBOT_WEBHOOK_KEY: ${{ secrets.PODBOT_WEBHOOK_KEY }}
+        run: |
+          if [ -z "$PODBOT_WEBHOOK_URL" ] || [ -z "$PODBOT_WEBHOOK_KEY" ]; then
+            echo "Test POST skipped: webhook secrets missing."
+            exit 0
+          fi
+          BODY="$(node -e "console.log(JSON.stringify({episodeTitle:'Test episode',episodeUrl:'',finishedAt:new Date().toISOString(),questions:[{question:'Test: what is a webhook?',timestamp:'01:23',alexaAnswer:'Test answer'}]}))")"
+          CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H "Authorization: $PODBOT_WEBHOOK_KEY" --data "$BODY" "$PODBOT_WEBHOOK_URL")"
+          echo "Test POST status: $CODE"
+
+      - name: Simulate skill (Q&A) with retries
+        if: "${{ steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success' }}"
+        run: |
+          attempt_sim () {
+            local INPUT="$1"
+            local TRY=0
+            local SID=""
+            while [ $TRY -lt 5 ]; do
+              TRY=$((TRY+1))
+              SIM_JSON="$(ask smapi simulate-skill -s "$SKILL_ID" --stage development --device-locale en-US --input-content "$INPUT" --profile default || true)"
+              SID="$(echo "$SIM_JSON" | jq -r '.id? // empty')"
+              echo "Simulation try $TRY id: ${SID:-<none>}"
+              if [ -n "$SID" ]; then
+                for i in $(seq 1 20); do
+                  OUT="$(ask smapi get-skill-simulation -s "$SKILL_ID" --simulation-id "$SID" --profile default || true)"
+                  STATUS="$(echo "$OUT" | jq -r '.status? // empty')"
+                  echo "Simulation status: ${STATUS:-<unknown>}"
+                  if [ "$STATUS" = "SUCCESSFUL" ] || [ "$STATUS" = "FAILED" ]; then
+                    echo "$OUT" | jq -r '{intentName: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationRequest?.body?.request?.intent?.name, slots: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationRequest?.body?.request?.intent?.slots, outputSpeech: (.result?.alexaExecutionInfo?.skillExecutionInfo?.invocationResponse?.body?.response?.outputSpeech // {})}'
+                    return 0
+                  fi
+                  sleep 2
+                done
+              fi
+              echo "No simulation id or not ready; backing off 15s..."
+              sleep 15
+            done
+            echo "::error title=Simulation failed::Could not obtain a successful simulation result after retries for input: $INPUT"
+            return 1
+          }
+          attempt_sim "ask pod bot what is a webhook"
+
+      - name: Simulate skill (Q&A sky) with retries
+        if: "${{ steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success' }}"
+        run: |
+          attempt_sim () {
+            local INPUT="$1"
+            local TRY=0
+            local SID=""
+            while [ $TRY -lt 5 ]; do
+              TRY=$((TRY+1))
+              SIM_JSON="$(ask smapi simulate-skill -s "$SKILL_ID" --stage development --device-locale en-US --input-content "$INPUT" --profile default || true)"
+              SID="$(echo "$SIM_JSON" | jq -r '.id? // empty')"
+              echo "Simulation try $TRY id: ${SID:-<none>}"
+              if [ -n "$SID" ]; then
+                for i in $(seq 1 20); do
+                  OUT="$(ask smapi get-skill-simulation -s "$SKILL_ID" --simulation-id "$SID" --profile default || true)"
+                  STATUS="$(echo "$OUT" | jq -r '.status? // empty')"
+                  echo "Simulation status: ${STATUS:-<unknown>}"
+                  if [ "$STATUS" = "SUCCESSFUL" ] || [ "$STATUS" = "FAILED" ]; then
+                    echo "$OUT" | jq -r '{intentName: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationRequest?.body?.request?.intent?.name, slots: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationRequest?.body?.request?.intent?.slots, outputSpeech: (.result?.alexaExecutionInfo?.skillExecutionInfo?.invocationResponse?.body?.response?.outputSpeech // {})}'
+                    return 0
+                  fi
+                  sleep 2
+                done
+              fi
+              echo "No simulation id or not ready; backing off 15s..."
+              sleep 15
+            done
+            echo "::error title=Simulation failed::Could not obtain a successful simulation result after retries for input: $INPUT"
+            return 1
+          }
+          attempt_sim "ask pod bot why is the sky blue"
+
+      - name: Simulate skill (Play Morning Brew) with retries
+        if: "${{ steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success' }}"
+        run: |
+          attempt_sim () {
+            local INPUT="$1"
+            local TRY=0
+            local SID=""
+            while [ $TRY -lt 5 ]; do
+              TRY=$((TRY+1))
+              SIM_JSON="$(ask smapi simulate-skill -s "$SKILL_ID" --stage development --device-locale en-US --input-content "$INPUT" --profile default || true)"
+              SID="$(echo "$SIM_JSON" | jq -r '.id? // empty')"
+              echo "Simulation try $TRY id: ${SID:-<none>}"
+              if [ -n "$SID" ]; then
+                for i in $(seq 1 20); do
+                  OUT="$(ask smapi get-skill-simulation -s "$SKILL_ID" --simulation-id "$SID" --profile default || true)"
+                  STATUS="$(echo "$OUT" | jq -r '.status? // empty')"
+                  echo "Simulation status: ${STATUS:-<unknown>}"
+                  if [ "$STATUS" = "SUCCESSFUL" ] || [ "$STATUS" = "FAILED" ]; then
+                    echo "Directives summary:"
+                    echo "$OUT" | jq -r '.result?.alexaExecutionInfo?.skillExecutionInfo?.invocationResponse?.body?.response?.directives // [] | map({type, url: (.audioItem?.stream?.url // ""), host: ((.audioItem?.stream?.url // "") | capture("^(?<h>https?://[^/]+)")?.h // ""), token: (.audioItem?.stream?.token // "")})'
+                    return 0
+                  fi
+                  sleep 2
+                done
+              fi
+              echo "No simulation id or not ready; backing off 15s..."
+              sleep 15
+            done
+            echo "::error title=Simulation failed::Could not obtain a successful simulation result after retries for input: $INPUT"
+            return 1
+          }
+          attempt_sim "ask pod bot to play Morning Brew"
+
+      - name: Report CodeCommit dev HEAD
+        if: "${{ steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success' }}"
+        env:
+          REPO_URL: ${{ steps.hosted.outputs.repo_url }}
+        run: |
+          # Fresh credentials for ls-remote
+          CREDS_JSON="$(ask smapi generate-credentials-for-alexa-hosted-skill -s "$SKILL_ID" --repository-url "$REPO_URL" --repository-type GIT --profile default || true)"
+          USERNAME="$(printf "%s" "$CREDS_JSON" | jq -r '..|.username? // .userName? // empty' | head -n1)"
+          PASSWORD="$(printf "%s" "$CREDS_JSON" | jq -r '..|.password? // .pass? // empty' | head -n1)"
+          echo "::add-mask::$USERNAME"
+          echo "::add-mask::$PASSWORD"
+          if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
+            echo "Could not fetch CodeCommit HEAD SHA."
+            exit 0
+          fi
+          BASIC="$(printf "%s:%s" "$USERNAME" "$PASSWORD" | base64 | tr -d '\n')"
+          SHA="$(git -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" ls-remote "$REPO_URL" dev | awk '{print $1}')"
+          echo "CodeCommit dev HEAD: ${SHA:-<unknown>}"
+name: Deploy Alexa Hosted Skill
+
+on:
   workflow_dispatch:
     inputs:
       send_test_batch:
