@@ -302,6 +302,8 @@ jobs:
           PASSWORD="$(printf "%s" "$CREDS_JSON" | jq -r '..|.password? // .pass? // empty' | head -n1)"
           echo "::add-mask::$USERNAME"
           echo "::add-mask::$PASSWORD"
+          BASIC="$(printf "%s:%s" "$USERNAME" "$PASSWORD" | base64 | tr -d '\n')"
+          echo "::add-mask::$BASIC"
           CRED_FILE="$(mktemp)"
           {
             echo "url=$REPO_URL"
@@ -309,9 +311,9 @@ jobs:
             echo "password=$PASSWORD"
           } | git -c credential.helper="store --file $CRED_FILE" credential-store store
           rm -rf alexa-verify
-          git -c credential.helper= -c credential.helper="store --file $CRED_FILE" clone "$REPO_URL" alexa-verify
+          git -c credential.helper= -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" clone "$REPO_URL" alexa-verify
           cd alexa-verify
-          git -c credential.helper= -c credential.helper="store --file $CRED_FILE" fetch origin
+          git -c credential.helper= -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" fetch origin
           echo "origin/master HEAD: $(git log -1 --format=%H origin/master || true)"
           echo "origin/dev    HEAD: $(git log -1 --format=%H origin/dev || true)"
           echo "GEMINI lines in origin/dev lambda/config.js:"
