@@ -1384,9 +1384,19 @@ async function tryPostAndMaybeClear(state, reason) {
   const body = Buffer.from(JSON.stringify(batch));
   const u = new URL(PODBOT_WEBHOOK_URL);
   // Process webhook key: if it contains an "Authorization:" prefix, strip it and use the remainder
-  let authValue = String(PODBOT_WEBHOOK_KEY || '');
+  let authValue = String(PODBOT_WEBHOOK_KEY || '').trim();
+  try { authValue = authValue.replace(/^\s*Authorization\s*:\s*/i, '').trim(); } catch {}
+  if (!/^Bearer\s+/i.test(authValue)) {
+    authValue = `Bearer ${authValue}`;
+  }
+  // Safe debug facts only (no secrets)
   try {
-    authValue = authValue.replace(/^\s*Authorization\s*:\s*/i, '').trim();
+    const authLen = authValue.length;
+    const authBearerCrsr = /^Bearer\s+crsr_/i.test(authValue);
+    const urlStr = PODBOT_WEBHOOK_URL || '';
+    const urlLen = urlStr.length;
+    const urlHttps = /^https:\/\//i.test(urlStr);
+    console.log('Webhook debug:', { authLen, authBearerCrsr, urlLen, urlHttps });
   } catch {}
   const options = {
     protocol: u.protocol,

@@ -69,9 +69,26 @@ jobs:
             echo "Missing webhook secrets; aborting."
             exit 1
           fi
-          # The secret holds the full Authorization header value; strip a leading "Authorization:" if present
+          # Normalize Authorization header value
           RAW="${PODBOT_WEBHOOK_KEY}"
-          VALUE="$(printf "%s" "$RAW" | sed -E 's/^[[:space:]]*[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn][[:space:]]*:[[:space:]]*//; s/[[:space:]]+$//')"
+          # Trim, strip leading "Authorization:" (case-insensitive), trim again
+          TMP="$(printf "%s" "$RAW" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+          TMP="$(printf "%s" "$TMP" | sed -E 's/^[[:space:]]*[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn][[:space:]]*:[[:space:]]*//')"
+          TMP="$(printf "%s" "$TMP" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+          # Prepend Bearer if not present (case-insensitive)
+          if ! printf "%s" "$TMP" | grep -qiE '^Bearer[[:space:]]+'; then
+            VALUE="Bearer ${TMP}"
+          else
+            VALUE="$TMP"
+          fi
+          # Safe debug: print only lengths and booleans, never values
+          VAL_LEN=${#VALUE}
+          BEARER_CRSR=false
+          if printf "%s" "$VALUE" | grep -qiE '^Bearer[[:space:]]+crsr_'; then BEARER_CRSR=true; fi
+          URL_LEN=${#PODBOT_WEBHOOK_URL}
+          URL_HTTPS=false
+          if printf "%s" "$PODBOT_WEBHOOK_URL" | grep -q '^https://'; then URL_HTTPS=true; fi
+          echo "WEBHOOK_DEBUG: authLen=${VAL_LEN} bearerCrsr=${BEARER_CRSR} urlLen=${URL_LEN} urlHttps=${URL_HTTPS}"
           # Send without printing secrets; show only HTTP status code
           STATUS="$(curl -sS -o /dev/null -w "%{http_code}" \
             -H "Authorization: ${VALUE}" \
