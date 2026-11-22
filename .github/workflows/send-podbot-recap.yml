@@ -1,0 +1,88 @@
+name: Send PodBot recap (one-off)
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [ "main" ]
+    paths:
+      - ".github/workflows/send-podbot-recap.yml"
+      - "recaps/recap.json"
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    env:
+      PODBOT_WEBHOOK_URL: ${{ secrets.PODBOT_WEBHOOK_URL }}
+      PODBOT_WEBHOOK_KEY: ${{ secrets.PODBOT_WEBHOOK_KEY }}
+      PODBOT_AUTH_HEADER: ${{ secrets.PODBOT_AUTH_HEADER }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build recap payload file
+        run: |
+          mkdir -p recaps
+          cat > recaps/recap.json <<'JSON'
+          {
+            "episodeTitle": "Anthropic IPO and Costco momentum — Morning Brew Daily",
+            "episodeUrl": "https://megaphone.link/MOBI8777994188",
+            "finishedAt": "2026-11-22T16:59:30.000Z",
+            "reason": "finished",
+            "questions": [
+              {
+                "question": "when was SpaceX's IPO",
+                "timestamp": "12:08",
+                "alexaAnswer": "SpaceX is still private and has not had an IPO. The episode was actually discussing Anthropic’s IPO.",
+                "episodeTitle": "Anthropic IPO and Costco momentum — Morning Brew Daily",
+                "episodeUrl": "https://megaphone.link/MOBI8777994188"
+              },
+              {
+                "question": "who is the CEO of Anthropic",
+                "timestamp": "18:41",
+                "alexaAnswer": "Dario Amodei is the CEO of Anthropic.",
+                "episodeTitle": "Anthropic IPO and Costco momentum — Morning Brew Daily",
+                "episodeUrl": "https://megaphone.link/MOBI8777994188"
+              },
+              {
+                "question": "what is a webhook",
+                "timestamp": "26:05",
+                "alexaAnswer": "A webhook is an automatic HTTP message that one app sends to another when an event happens, so the receiver can react immediately.",
+                "episodeTitle": "Anthropic IPO and Costco momentum — Morning Brew Daily",
+                "episodeUrl": "https://megaphone.link/MOBI8777994188"
+              },
+              {
+                "question": "what are they talking about",
+                "timestamp": "33:27",
+                "alexaAnswer": "They’re talking about Costco’s strong traffic and membership model—steady sales growth, value perception, and why that momentum continues.",
+                "episodeTitle": "Anthropic IPO and Costco momentum — Morning Brew Daily",
+                "episodeUrl": "https://megaphone.link/MOBI8777994188"
+              }
+            ]
+          }
+          JSON
+          echo "Payload written to recaps/recap.json"
+
+      - name: Post recap to PodBot webhook
+        id: post
+        run: |
+          if [ -z "${PODBOT_WEBHOOK_URL}" ] || [ -z "${PODBOT_WEBHOOK_KEY}" ]; then
+            echo "Missing webhook secrets; aborting."
+            exit 1
+          }
+          AUTH_NAME="${PODBOT_AUTH_HEADER:-Authorization}"
+          # Send without printing secrets; show only HTTP status code
+          STATUS="$(curl -sS -o /dev/null -w "%{http_code}" \
+            -H "${AUTH_NAME}: ${PODBOT_WEBHOOK_KEY}" \
+            -H "Content-Type: application/json" \
+            --data-binary @recaps/recap.json \
+            "${PODBOT_WEBHOOK_URL}")"
+          echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
+          # Fail if not 2xx
+          case "$STATUS" in
+            2*) echo "Webhook accepted with status $STATUS" ;;
+            *) echo "Webhook failed with status $STATUS" ; exit 1 ;;
+          esac
+
+      - name: Print webhook HTTP status (no secrets)
+        run: |
+          echo "WEBHOOK_STATUS=${{ steps.post.outputs.status }}"
