@@ -143,6 +143,7 @@ jobs:
       - name: Fallback push via generated credentials
         id: push_fallback
         if: steps.push_helper.outcome == 'failure'
+        continue-on-error: true
         env:
           REPO_URL: ${{ steps.hosted.outputs.repo_url }}
         run: |
