@@ -2,6 +2,9 @@ PodBot — Alexa-hosted custom skill (Node.js)
 
 This repository contains the source for an Alexa-hosted skill named "PodBot". It plays the latest Morning Brew Daily episode and lets you ask open questions or what you just heard using Gemini.
 
+Notes:
+- The CI deploy preserves the live endpoint by fetching the live manifest first, merging only required changes (e.g., AUDIO_PLAYER), and guarding that `apis.custom.endpoint.uri` remains present.
+
 Quick start
 - Invocation name: "pod bot"
 - Example phrases:
