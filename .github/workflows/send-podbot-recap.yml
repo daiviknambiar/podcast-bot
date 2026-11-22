@@ -68,7 +68,7 @@ jobs:
           if [ -z "${PODBOT_WEBHOOK_URL}" ] || [ -z "${PODBOT_WEBHOOK_KEY}" ]; then
             echo "Missing webhook secrets; aborting."
             exit 1
-          }
+          fi
           AUTH_NAME="${PODBOT_AUTH_HEADER:-Authorization}"
           # Send without printing secrets; show only HTTP status code
           STATUS="$(curl -sS -o /dev/null -w "%{http_code}" \
