@@ -458,8 +458,10 @@ async function callGeminiAnswer({ question, hint, audioBase64, notes, model = GE
       const elapsed = Date.now() - startTs;
       const remaining = Math.max(0, TOTAL_BUDGET_MS - elapsed);
       if (remaining < 400) break; // not enough time left
-      // First attempt ~2.5s, subsequent share remaining
-      const desired = idx === 0 ? 2500 : 1800;
+      // Ensure at least ~1.5s remains for a subsequent attempt
+      if (idx >= 1 && remaining < 1500) break;
+      // First attempt up to ~5s (subject to remaining), subsequent ~1.8s
+      const desired = idx === 0 ? 5000 : 1800;
       const timeoutMs = Math.max(700, Math.min(desired, remaining - 200));
       let res;
       try {
@@ -509,9 +511,9 @@ async function getAnswer({ question, audioBase64, notes, hint, budgetMs = 6000 }
   } else if (OPENAI_API_KEY) {
     console.log('Skipping OpenAI due to low remaining budget:', remaining, 'ms');
   }
-  // Neither provider configured
-  console.error('Answer provider unavailable: GEMINI_API_KEY missing and OPENAI_API_KEY missing');
-  return 'Sorry, I could not analyze that just now.';
+  // All providers failed or timed out
+  console.error('All providers exhausted or timed out');
+  return 'Sorry, that took too long. Try asking again.';
 }
 
 async function sendProgressiveResponse(handlerInput, speech) {
@@ -739,45 +741,26 @@ async function handleOpenQuestion(handlerInput, questionFromUser, carrierWord) {
       ]);
     };
     let audioBase64 = null;
-    if (url) {
-      // Try to include last ~75s snippet for context and ~90s upcoming
+    // Only fetch episode snippet when question likely refers to episode/podcast/hosts
+    const isEpisodeQuestion = /\b(they|this|that|it|episode|podcast|host|hosts)\b/i.test(`${carrierWord || ''} ${qText}`);
+    if (url && isEpisodeQuestion) {
       try {
         const id3Size = state.id3Size ?? 0;
-        let bytesPerSecond = state.bytesPerSecond ?? null;
-        if (!bytesPerSecond) {
-          try {
-            const meta = await withTimeout(probeMp3MetadataImpl(url), 2000, 'probeMp3Metadata');
-            if (meta && typeof meta.bytesPerSecond === 'number') bytesPerSecond = meta.bytesPerSecond;
-          } catch (e) {
-            console.log('Q&A: probe skipped:', (e && e.message) || String(e));
-          }
-        }
-        if (!bytesPerSecond) throw new Error('no bytesPerSecond');
-        const lookbackMs = (LOOKBACK_SECONDS || 75) * 1000;
+        const bytesPerSecond = state.bytesPerSecond ?? 16000; // assume ~128kbps if unknown
+        const lookbackMs = Math.min(60000, (LOOKBACK_SECONDS || 75) * 1000); // cap ~60s
         const startMs = Math.max(0, (offsetMs || 0) - lookbackMs);
         const startByte = id3Size + Math.max(0, Math.floor((startMs / 1000) * bytesPerSecond));
         const endByte = startByte + Math.max(2048, Math.floor((lookbackMs / 1000) * bytesPerSecond)) - 1;
-        const rangeBuf = await withTimeout(fetchMp3Range(url, startByte, endByte), 2000, 'fetchMp3Range');
+        const rangeBuf = await withTimeout(fetchMp3Range(url, startByte, endByte), 900, 'fetchMp3Range');
         const trimmed = trimToFrameSync(rangeBuf);
         const recentB64 = trimmed.toString('base64');
-        let upcomingB64 = null;
-        try {
-          const aheadSeconds = 90;
-          const startByte2 = id3Size + Math.max(0, Math.floor(((offsetMs || 0) / 1000) * bytesPerSecond));
-          const endByte2 = startByte2 + Math.max(2048, Math.floor(aheadSeconds * bytesPerSecond)) - 1;
-          const futureBuf = await withTimeout(fetchMp3Range(url, startByte2, endByte2), 2000, 'fetchMp3Range2');
-          const futureTrim = trimToFrameSync(futureBuf);
-          upcomingB64 = futureTrim.toString('base64');
-        } catch (e2) {
-          console.log('Q&A: upcoming snippet skipped:', (e2 && e2.message) || String(e2));
-        }
-        audioBase64 = { recent: recentB64, upcoming: upcomingB64 };
+        audioBase64 = { recent: recentB64 };
       } catch (e) {
         console.log('Q&A: audio snippet skipped:', (e && e.message) || String(e));
       }
     }
     const answerCaller = (typeof global.__overrideGetAnswer === 'function') ? global.__overrideGetAnswer : getAnswer;
-    const QA_TOTAL_MS = 6000;
+    const QA_TOTAL_MS = 6600;
     const elapsed = Date.now() - qaStart;
     const remainingForLLM = Math.max(800, QA_TOTAL_MS - elapsed);
     const hint = carrierWord ? `${carrierWord} ${qText}` : qText;
