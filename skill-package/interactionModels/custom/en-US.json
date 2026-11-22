@@ -121,6 +121,40 @@
           ]
         },
         {
+          "name": "SkipForwardIntent",
+          "slots": [
+            { "name": "amount", "type": "AMAZON.NUMBER" },
+            { "name": "unit", "type": "UNIT" }
+          ],
+          "samples": [
+            "skip ahead",
+            "skip ahead {amount}",
+            "skip ahead {amount} {unit}",
+            "go ahead",
+            "go ahead {amount}",
+            "go ahead {amount} {unit}",
+            "fast forward {amount}",
+            "fast forward {amount} {unit}",
+            "jump ahead {amount} {unit}"
+          ]
+        },
+        {
+          "name": "SkipBackIntent",
+          "slots": [
+            { "name": "amount", "type": "AMAZON.NUMBER" },
+            { "name": "unit", "type": "UNIT" }
+          ],
+          "samples": [
+            "go back",
+            "go back {amount}",
+            "go back {amount} {unit}",
+            "rewind",
+            "rewind {amount}",
+            "rewind {amount} {unit}",
+            "skip back {amount} {unit}"
+          ]
+        },
+        {
           "name": "AskAboutIntent",
           "slots": [
             {
@@ -197,7 +231,15 @@
           "samples": []
         }
       ],
-      "types": []
+      "types": [
+        {
+          "name": "UNIT",
+          "values": [
+            { "name": { "value": "seconds", "synonyms": ["second", "secs", "sec"] } },
+            { "name": { "value": "minutes", "synonyms": ["minute", "mins", "min"] } }
+          ]
+        }
+      ]
     }
   }
 }

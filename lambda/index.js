@@ -598,6 +598,24 @@ function buildPlayDirective(url, token, offsetMs) {
   };
 }
 
+function getLatestOffsetMs(requestEnvelope, state) {
+  try {
+    const ctx = requestEnvelope?.context?.AudioPlayer || {};
+    const playerActivity = ctx.playerActivity;
+    const ctxOffset = typeof ctx.offsetInMilliseconds === 'number' ? ctx.offsetInMilliseconds : null;
+    // Prefer context offset when available
+    if (ctxOffset != null) {
+      console.log('Offset (context):', ctxOffset, 'activity:', playerActivity || '<none>');
+      return ctxOffset;
+    }
+  } catch (e) {
+    // ignore
+  }
+  const saved = state && typeof state.lastOffsetMs === 'number' ? state.lastOffsetMs : 0;
+  console.log('Offset (saved state):', saved);
+  return saved || 0;
+}
+
 // ---------- Intent Handlers ----------
 const LaunchRequestHandler = {
   canHandle(handlerInput) {
@@ -714,10 +732,9 @@ async function handleOpenQuestion(handlerInput, questionFromUser, carrierWord) {
   const attributesManager = handlerInput.attributesManager;
   const playerActivity = requestEnvelope.context?.AudioPlayer?.playerActivity || 'IDLE';
   const wasPlaying = playerActivity === 'PLAYING';
-  const ctxOffset = requestEnvelope.context?.AudioPlayer?.offsetInMilliseconds;
   const state = await getState(attributesManager);
   const url = state.lastUrl;
-  const offsetMs = typeof ctxOffset === 'number' ? ctxOffset : (state.lastOffsetMs || 0);
+  const offsetMs = getLatestOffsetMs(requestEnvelope, state);
 
   try { console.log('OpenQuestion text:', String(questionFromUser || '').slice(0, 100)); } catch {}
   await sendProgressiveResponse(handlerInput, 'One sec.');
@@ -807,13 +824,23 @@ async function handleOpenQuestion(handlerInput, questionFromUser, carrierWord) {
     console.error('Question log error:', e);
   }
 
-  const rb = handlerInput.responseBuilder.speak(wasPlaying ? `${answer} Say resume to continue.` : answer);
-  if (wasPlaying) {
-    rb.reprompt('Say resume to continue.');
-  } else {
-    rb.reprompt('You can say, play Morning Brew.');
+  const rb = handlerInput.responseBuilder.speak(answer);
+  if (wasPlaying && state.lastUrl && state.lastToken != null) {
+    // Resume automatically at the freshest offset
+    const resumeOffset = getLatestOffsetMs(handlerInput.requestEnvelope, state);
+    console.log('Q&A resume: url=', state.lastUrl, 'token=', state.lastToken, 'offsetMs=', resumeOffset);
+    // Persist the offset used
+    try {
+      state.lastOffsetMs = resumeOffset;
+      await saveState(attributesManager, state);
+      console.log('Saved offset after Q&A:', resumeOffset);
+    } catch (e) {
+      console.log('Save offset after Q&A failed:', e && e.message);
+    }
+    const directive = buildPlayDirective(state.lastUrl, state.lastToken, resumeOffset);
+    return rb.addDirective(directive).withShouldEndSession(true).getResponse();
   }
-  return rb.getResponse();
+  return rb.reprompt('You can say, play Morning Brew.').getResponse();
 }
 
 const AskAboutIntentHandler = {
@@ -880,6 +907,10 @@ const PauseIntentHandler = {
   async handle(handlerInput) {
     try {
       const state = await getState(handlerInput.attributesManager);
+      const off = getLatestOffsetMs(handlerInput.requestEnvelope, state);
+      state.lastOffsetMs = off;
+      await saveState(handlerInput.attributesManager, state);
+      console.log('PauseIntent: saved offset', off);
       if (Array.isArray(state.questionsPending) && state.questionsPending.length > 0) {
         await tryPostAndMaybeClear(state, 'stop');
         await saveState(handlerInput.attributesManager, state);
@@ -1002,6 +1033,7 @@ const PlaybackStoppedHandler = {
     const state = await getState(handlerInput.attributesManager);
     state.lastToken = token || state.lastToken;
     state.lastOffsetMs = offset;
+    console.log('PlaybackStopped: saved offset', offset);
     await saveState(handlerInput.attributesManager, state);
     return handlerInput.responseBuilder.getResponse();
   }
@@ -1011,8 +1043,19 @@ const PlaybackNearlyFinishedHandler = {
   canHandle(handlerInput) {
     return Alexa.getRequestType(handlerInput.requestEnvelope) === 'AudioPlayer.PlaybackNearlyFinished';
   },
-  handle(handlerInput) {
-    // No enqueueing for latest-only stream
+  async handle(handlerInput) {
+    try {
+      const state = await getState(handlerInput.attributesManager);
+      const ctx = handlerInput.requestEnvelope?.request;
+      const off = typeof ctx?.offsetInMilliseconds === 'number' ? ctx.offsetInMilliseconds : null;
+      if (off != null) {
+        state.lastOffsetMs = off;
+        await saveState(handlerInput.attributesManager, state);
+        console.log('PlaybackNearlyFinished: saved offset', off);
+      }
+    } catch (e) {
+      console.log('NearlyFinished save error:', e && e.message);
+    }
     return handlerInput.responseBuilder.getResponse();
   }
 };
@@ -1034,6 +1077,7 @@ const PlaybackFinishedHandler = {
       console.error('Flush on finish error:', e);
     }
     await saveState(handlerInput.attributesManager, state);
+    console.log('PlaybackFinished: cleared offset to 0');
     return handlerInput.responseBuilder.getResponse();
   }
 };
@@ -1113,7 +1157,7 @@ const ErrorHandler = {
 const skillBuilder = Alexa.SkillBuilders.custom();
 
 const LoggingRequestInterceptor = {
-  process(handlerInput) {
+  async process(handlerInput) {
     try {
       const type = Alexa.getRequestType(handlerInput.requestEnvelope);
       if (type === 'IntentRequest') {
@@ -1121,6 +1165,20 @@ const LoggingRequestInterceptor = {
         const slots = handlerInput.requestEnvelope?.request?.intent?.slots || {};
         const snippet = JSON.stringify(slots).slice(0, 300);
         console.log('IntentRequest:', name, 'slots:', snippet);
+        // Persist context offset opportunistically when audio is paused or stopped
+        try {
+          const ctx = handlerInput.requestEnvelope?.context?.AudioPlayer || {};
+          const activity = ctx.playerActivity;
+          const off = typeof ctx.offsetInMilliseconds === 'number' ? ctx.offsetInMilliseconds : null;
+          if ((activity === 'PAUSED' || activity === 'STOPPED') && off != null) {
+            const state = await getState(handlerInput.attributesManager);
+            state.lastOffsetMs = off;
+            await saveState(handlerInput.attributesManager, state);
+            console.log('Saved offset from IntentRequest context:', off, 'activity:', activity);
+          }
+        } catch (e) {
+          console.log('Save offset from IntentRequest failed:', e && e.message);
+        }
       } else {
         console.log('Request type:', type);
       }
@@ -1130,12 +1188,84 @@ const LoggingRequestInterceptor = {
   }
 };
 
+// Seek forward/back intents
+function parseDeltaMillis(handlerInput, defaultSeconds, forward) {
+  const amountStr = Alexa.getSlotValue(handlerInput.requestEnvelope, 'amount') || '';
+  let n = parseInt(String(amountStr), 10);
+  if (!Number.isFinite(n) || n <= 0) n = defaultSeconds;
+  const unitRaw = Alexa.getSlotValue(handlerInput.requestEnvelope, 'unit') || '';
+  const unit = String(unitRaw || '').toLowerCase();
+  const seconds = unit.startsWith('min') ? n * 60 : n;
+  const delta = seconds * 1000;
+  return forward ? delta : -delta;
+}
+
+const SkipForwardIntentHandler = {
+  canHandle(handlerInput) {
+    const type = Alexa.getRequestType(handlerInput.requestEnvelope);
+    if (type !== 'IntentRequest') return false;
+    const name = Alexa.getIntentName(handlerInput.requestEnvelope) || '';
+    return name === 'SkipForwardIntent';
+  },
+  async handle(handlerInput) {
+    const state = await getState(handlerInput.attributesManager);
+    if (!state.lastUrl || state.lastToken == null) {
+      return handlerInput.responseBuilder
+        .speak('Nothing is playing. Say, play Morning Brew.')
+        .reprompt('Say, play Morning Brew.')
+        .getResponse();
+    }
+    const base = getLatestOffsetMs(handlerInput.requestEnvelope, state);
+    const delta = parseDeltaMillis(handlerInput, 30, true);
+    const next = Math.max(0, base + delta);
+    console.log('Seek forward:', { base, delta, next });
+    state.lastOffsetMs = next;
+    await saveState(handlerInput.attributesManager, state);
+    const directive = buildPlayDirective(state.lastUrl, state.lastToken, next);
+    return handlerInput.responseBuilder
+      .addDirective(directive)
+      .withShouldEndSession(true)
+      .getResponse();
+  }
+};
+
+const SkipBackIntentHandler = {
+  canHandle(handlerInput) {
+    const type = Alexa.getRequestType(handlerInput.requestEnvelope);
+    if (type !== 'IntentRequest') return false;
+    const name = Alexa.getIntentName(handlerInput.requestEnvelope) || '';
+    return name === 'SkipBackIntent';
+  },
+  async handle(handlerInput) {
+    const state = await getState(handlerInput.attributesManager);
+    if (!state.lastUrl || state.lastToken == null) {
+      return handlerInput.responseBuilder
+        .speak('Nothing is playing. Say, play Morning Brew.')
+        .reprompt('Say, play Morning Brew.')
+        .getResponse();
+    }
+    const base = getLatestOffsetMs(handlerInput.requestEnvelope, state);
+    const delta = parseDeltaMillis(handlerInput, 30, false);
+    const next = Math.max(0, base + delta);
+    console.log('Seek back:', { base, delta, next });
+    state.lastOffsetMs = next;
+    await saveState(handlerInput.attributesManager, state);
+    const directive = buildPlayDirective(state.lastUrl, state.lastToken, next);
+    return handlerInput.responseBuilder
+      .addDirective(directive)
+      .withShouldEndSession(true)
+      .getResponse();
+  }
+};
+
 exports.handler = skillBuilder
   .withPersistenceAdapter(getPersistenceAdapter())
   .addRequestInterceptors(LoggingRequestInterceptor)
   .addRequestHandlers(
     LaunchRequestHandler,
     PlayPodcastIntentHandler,
+    SkipForwardIntentHandler,
+    SkipBackIntentHandler,
     WhoIntentHandler,
     WhatIntentHandler,
     WhyIntentHandler,
