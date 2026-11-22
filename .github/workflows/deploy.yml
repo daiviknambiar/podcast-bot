@@ -292,6 +292,31 @@ jobs:
             GIT_TRACE=0 git -c credential.helper= -c http."$REPO_URL".extraHeader="Authorization: Basic $BASIC" push --force alexa HEAD:dev
           fi
 
+      - name: Verify CodeCommit heads and config
+        if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
+        env:
+          REPO_URL: ${{ steps.hosted.outputs.repo_url }}
+        run: |
+          CREDS_JSON="$(ask smapi generate-credentials-for-alexa-hosted-skill -s "$SKILL_ID" --repository-url "$REPO_URL" --repository-type GIT --profile default || true)"
+          USERNAME="$(printf "%s" "$CREDS_JSON" | jq -r '..|.username? // .userName? // empty' | head -n1)"
+          PASSWORD="$(printf "%s" "$CREDS_JSON" | jq -r '..|.password? // .pass? // empty' | head -n1)"
+          echo "::add-mask::$USERNAME"
+          echo "::add-mask::$PASSWORD"
+          CRED_FILE="$(mktemp)"
+          {
+            echo "url=$REPO_URL"
+            echo "username=$USERNAME"
+            echo "password=$PASSWORD"
+          } | git -c credential.helper="store --file $CRED_FILE" credential-store store
+          rm -rf alexa-verify
+          git -c credential.helper="store --file $CRED_FILE" clone "$REPO_URL" alexa-verify
+          cd alexa-verify
+          git -c credential.helper="store --file $CRED_FILE" fetch origin
+          echo "origin/master HEAD: $(git log -1 --format=%H origin/master || true)"
+          echo "origin/dev    HEAD: $(git log -1 --format=%H origin/dev || true)"
+          echo "GEMINI lines in origin/dev lambda/config.js:"
+          git show origin/dev:lambda/config.js | grep -n GEMINI || true
+
       - name: Update manifest via SMAPI (development)
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
         continue-on-error: true

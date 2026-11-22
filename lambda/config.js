@@ -1,10 +1,10 @@
 module.exports = {
   // Accepts either 'gemini-...' or fully-qualified 'models/gemini-...'
   // Default chain prefers free-tier friendly models first; 3.8-flash last.
-  GEMINI_MODEL: 'models/gemini-2.5-flash-lite',
+  GEMINI_MODEL: 'models/gemini-flash-lite-latest',
   GEMINI_FALLBACK_MODELS: [
-    'models/gemini-2.5-flash',
-    'models/gemini-flash-lite-latest'
+    'models/gemini-3.5-flash-lite',
+    'models/gemini-3.8-flash'
   ],
   // OpenAI preferred (cheapest first)
   OPENAI_MODEL: 'gpt-4.1-nano',
