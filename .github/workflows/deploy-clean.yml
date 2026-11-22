@@ -76,9 +76,23 @@ jobs:
           PODBOT_WEBHOOK_KEY: ${{ secrets.PODBOT_WEBHOOK_KEY }}
           PODBOT_AUTH_HEADER: ${{ secrets.PODBOT_AUTH_HEADER }}
         run: |
-          node -e "const fs=require('fs');const t=v=>(String(v||'').trim().replace(/^['\"]|['\"]$/g,''));const data={GEMINI_API_KEY:t(process.env.GEMINI_API_KEY),OPENAI_API_KEY:t(process.env.OPENAI_API_KEY),PODBOT_WEBHOOK_URL:t(process.env.PODBOT_WEBHOOK_URL),PODBOT_WEBHOOK_KEY:t(process.env.PODBOT_WEBHOOK_KEY),PODBOT_AUTH_HEADER:t(process.env.PODBOT_AUTH_HEADER||'Authorization')};const lines=['module.exports = {'];for(const[k,v]of Object.entries(data)){lines.push(`  ${k}: ${JSON.stringify(v)},`);}lines.push('};');fs.mkdirSync('lambda',{recursive:true});fs.writeFileSync('lambda/gemini-key.js',lines.join('\n'));"
+          node -e "const fs=require('fs');const t=v=>(String(v||'').trim().replace(/^['\"]|['\"]$/g,''));const data={GEMINI_API_KEY:t(process.env.GEMINI_API_KEY),OPENAI_API_KEY:t(process.env.OPENAI_API_KEY),PODBOT_WEBHOOK_URL:t(process.env.PODBOT_WEBHOOK_URL),PODBOT_WEBHOOK_KEY:t(process.env.PODBOT_WEBHOOK_KEY),PODBOT_AUTH_HEADER:t(process.env.PODBOT_AUTH_HEADER||'Authorization')};const lines=['module.exports = {'];for(const[k,v]of Object.entries(data)){lines.push(`  ${k}: ${JSON.stringify(v)},`);}lines.push('};');fs.mkdirSync('lambda',{recursive:true});fs.writeFileSync('lambda/gemini-key.js',lines.join('\n'));const lens=Object.fromEntries(Object.entries(data).map(([k,v])=>[k,(v||'').length]));console.log(Object.entries(lens).map(([k,v])=>`${k}=${v}`).join(' '));"
           git add -f lambda/gemini-key.js
           git commit -m "deploy: inject runtime secrets [throwaway]"
+
+      - name: "Validate written key lengths (fail if GEMINI_API_KEY empty)"
+        run: |
+          node -e "const fs=require('fs');const m=require('./lambda/gemini-key.js');const lens=Object.fromEntries(Object.entries(m).map(([k,v])=>[k,(String(v||'')).length]));console.log(Object.entries(lens).map(([k,v])=>`${k}=${v}`).join(' ')); if(!m.GEMINI_API_KEY || String(m.GEMINI_API_KEY).length===0){process.exitCode=2;}"
+
+      - name: "List repository secrets (names only)"
+        continue-on-error: true
+        run: |
+          if command -v gh >/dev/null 2>&1; then
+            echo "Secrets (repo scope):"
+            gh secret list | awk '{print $1}' | sort
+          else
+            echo "gh not available; skipping secret name listing."
+          fi
 
       - name: Push to Alexa Hosted via helper
         id: push_helper
@@ -134,8 +148,8 @@ jobs:
           echo "Key file check on origin/dev:"
           if git show origin/dev:lambda/gemini-key.js >/tmp/gemini-key.js 2>/dev/null; then
             echo "lambda/gemini-key.js: present"
-            LEN=$(node -e "const fs=require('fs');const d=fs.readFileSync('/tmp/gemini-key.js','utf8');const m=d.match(/GEMINI_API_KEY:\\s*['\\\"]([^'\\\"]*)['\\\"]/);const v=(m&&m[1])?m[1].trim():'';console.log(v.length);")
-            echo "GEMINI_API_KEY length: $LEN"
+            LEN=$(node -e "const m=require('/tmp/gemini-key.js');const v=(m&&m.GEMINI_API_KEY)?String(m.GEMINI_API_KEY).trim():'';console.log(v.length);")
+            echo "GEMINI_API_KEY length (dev): $LEN"
           else
             echo "lambda/gemini-key.js: missing"
           fi
