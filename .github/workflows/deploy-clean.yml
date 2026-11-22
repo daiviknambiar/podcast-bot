@@ -223,6 +223,18 @@ jobs:
             sleep 5
           done
 
+      - name: Verify live model contains new intents
+        run: |
+          sleep 3
+          MODEL_JSON="$(ask smapi get-interaction-model -s "$SKILL_ID" -g development -l en-US --profile default)"
+          echo "$MODEL_JSON" | jq -r '.interactionModel.languageModel.intents[].name' | sort | uniq | sed 's/^/INTENT: /'
+          for N in GeneralQueryIntent SkipForwardIntent SkipBackIntent ResumeAliasIntent; do
+            if ! echo "$MODEL_JSON" | jq -r '.interactionModel.languageModel.intents[].name' | grep -qx "$N"; then
+              echo "::error title=Intent missing::$N not found in live model"
+              exit 1
+            fi
+          done
+
       - name: Gemini smoke test (no secrets in logs)
         run: |
           node - <<'NODE'
