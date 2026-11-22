@@ -565,8 +565,9 @@ const PlayPodcastIntentHandler = {
   canHandle(handlerInput) {
     const { requestEnvelope } = handlerInput;
     const type = Alexa.getRequestType(requestEnvelope);
+    if (type !== 'IntentRequest') return false;
     const intentName = Alexa.getIntentName(requestEnvelope) || '';
-    return type === 'IntentRequest' && intentName === 'PlayPodcastIntent';
+    return intentName === 'PlayPodcastIntent';
   },
   async handle(handlerInput) {
     const attributesManager = handlerInput.attributesManager;
@@ -634,6 +635,13 @@ async function handleOpenQuestion(handlerInput, questionFromUser) {
 
   let answer = 'Sorry, I could not get that.';
   try {
+    const qText = (questionFromUser || '').toString().trim();
+    if (!qText) {
+      return handlerInput.responseBuilder
+        .speak('What would you like to know?')
+        .reprompt('What would you like to know?')
+        .getResponse();
+    }
     let audioBase64 = null;
     if (url) {
       // Try to include last ~75s snippet for context and ~90s upcoming
@@ -658,7 +666,7 @@ async function handleOpenQuestion(handlerInput, questionFromUser) {
       audioBase64 = { recent: recentB64, upcoming: upcomingB64 };
     }
     answer = await getAnswer({
-      question: questionFromUser || '',
+      question: qText,
       audioBase64,
       notes: state.lastNotes || ''
     });
@@ -702,8 +710,9 @@ const AskAboutIntentHandler = {
   canHandle(handlerInput) {
     const { requestEnvelope } = handlerInput;
     const type = Alexa.getRequestType(requestEnvelope);
+    if (type !== 'IntentRequest') return false;
     const intentName = Alexa.getIntentName(requestEnvelope) || '';
-    return type === 'IntentRequest' && intentName === 'AskAboutIntent';
+    return intentName === 'AskAboutIntent';
   },
   async handle(handlerInput) {
     const topic = Alexa.getSlotValue(handlerInput.requestEnvelope, 'topic') || '';
@@ -715,8 +724,9 @@ const OpenQuestionIntentHandler = {
   canHandle(handlerInput) {
     const { requestEnvelope } = handlerInput;
     const type = Alexa.getRequestType(requestEnvelope);
+    if (type !== 'IntentRequest') return false;
     const intentName = Alexa.getIntentName(requestEnvelope) || '';
-    return type === 'IntentRequest' && intentName === 'OpenQuestionIntent';
+    return intentName === 'OpenQuestionIntent';
   },
   async handle(handlerInput) {
     const slots = handlerInput.requestEnvelope?.request?.intent?.slots || {};
@@ -729,8 +739,9 @@ const OpenQuestionIntentHandler = {
 const PauseIntentHandler = {
   canHandle(handlerInput) {
     const type = Alexa.getRequestType(handlerInput.requestEnvelope);
+    if (type !== 'IntentRequest') return false;
     const name = Alexa.getIntentName(handlerInput.requestEnvelope) || '';
-    return type === 'IntentRequest' && (name === 'AMAZON.PauseIntent' || name === 'AMAZON.StopIntent' || name === 'AMAZON.CancelIntent');
+    return (name === 'AMAZON.PauseIntent' || name === 'AMAZON.StopIntent' || name === 'AMAZON.CancelIntent');
   },
   async handle(handlerInput) {
     try {
@@ -752,8 +763,9 @@ const PauseIntentHandler = {
 const ResumeIntentHandler = {
   canHandle(handlerInput) {
     const type = Alexa.getRequestType(handlerInput.requestEnvelope);
+    if (type !== 'IntentRequest') return false;
     const name = Alexa.getIntentName(handlerInput.requestEnvelope) || '';
-    return type === 'IntentRequest' && (name === 'AMAZON.ResumeIntent');
+    return (name === 'AMAZON.ResumeIntent');
   },
   async handle(handlerInput) {
     const state = await getState(handlerInput.attributesManager);
@@ -775,6 +787,7 @@ const ResumeIntentHandler = {
 const SimpleResponseIntentHandler = {
   canHandle(handlerInput) {
     const type = Alexa.getRequestType(handlerInput.requestEnvelope);
+    if (type !== 'IntentRequest') return false;
     const name = Alexa.getIntentName(handlerInput.requestEnvelope) || '';
     const simpleIntents = new Set([
       'AMAZON.HelpIntent',
@@ -801,8 +814,11 @@ const SimpleResponseIntentHandler = {
         speakOutput = 'Say, play Morning Brew, or ask me a question like, what is compute.';
         return rb.speak(speakOutput).reprompt('You can say, play Morning Brew.').getResponse();
       case 'AMAZON.FallbackIntent':
-        // Route to open question flow with no specific query
-        return handleOpenQuestion(handlerInput, '');
+        // Ask for the question explicitly rather than calling Gemini with empty
+        return handlerInput.responseBuilder
+          .speak('What would you like to know?')
+          .reprompt('What would you like to know?')
+          .getResponse();
       case 'AMAZON.StartOverIntent':
         return (async () => {
           const state = await getState(handlerInput.attributesManager);
@@ -947,8 +963,27 @@ const ErrorHandler = {
 // ---------- Skill Builder ----------
 const skillBuilder = Alexa.SkillBuilders.custom();
 
+const LoggingRequestInterceptor = {
+  process(handlerInput) {
+    try {
+      const type = Alexa.getRequestType(handlerInput.requestEnvelope);
+      if (type === 'IntentRequest') {
+        const name = Alexa.getIntentName(handlerInput.requestEnvelope);
+        const slots = handlerInput.requestEnvelope?.request?.intent?.slots || {};
+        const snippet = JSON.stringify(slots).slice(0, 300);
+        console.log('IntentRequest:', name, 'slots:', snippet);
+      } else {
+        console.log('Request type:', type);
+      }
+    } catch (e) {
+      console.log('Interceptor log error:', (e && e.message) || String(e));
+    }
+  }
+};
+
 exports.handler = skillBuilder
   .withPersistenceAdapter(getPersistenceAdapter())
+  .addRequestInterceptors(LoggingRequestInterceptor)
   .addRequestHandlers(
     LaunchRequestHandler,
     PlayPodcastIntentHandler,
