@@ -37,44 +37,87 @@
             }
           ],
           "samples": [
-            "what {q}",
-            "what is {q}",
-            "whats {q}",
-            "what are {q}",
-            "who is {q}",
-            "who {q}",
-            "who was {q}",
-            "why {q}",
-            "why is {q}",
-            "why do {q}",
-            "why does {q}",
-            "how {q}",
-            "how does {q}",
-            "how do {q}",
-            "how is {q}",
-            "how does {q} work",
-            "when {q}",
-            "where {q}",
-            "which {q}",
-            "is {q}",
-            "are {q}",
-            "does {q}",
-            "do {q}",
-            "can {q}",
-            "tell me about {q}",
-            "tell me {q}",
-            "explain {q}",
-            "explain {q} simply",
+            "question {q}",
+            "i have a question {q}",
+            "can you tell me {q}",
             "question {q}",
             "i have a question {q}",
             "can you tell me {q}",
             "what does {q} mean",
-            "define {q}",
             "give me information about {q}",
             "teach me about {q}",
             "summarize {q}",
             "what did they say about {q}",
             "what are they talking about {q}"
+          ]
+        },
+        {
+          "name": "WhoIntent",
+          "slots": [
+            { "name": "q", "type": "AMAZON.SearchQuery" }
+          ],
+          "samples": [
+            "who {q}",
+            "who is {q}",
+            "who was {q}"
+          ]
+        },
+        {
+          "name": "WhatIntent",
+          "slots": [
+            { "name": "q", "type": "AMAZON.SearchQuery" }
+          ],
+          "samples": [
+            "what {q}",
+            "what is {q}",
+            "what are {q}",
+            "what does {q} mean"
+          ]
+        },
+        {
+          "name": "WhyIntent",
+          "slots": [
+            { "name": "q", "type": "AMAZON.SearchQuery" }
+          ],
+          "samples": [
+            "why {q}",
+            "why is {q}",
+            "why do {q}",
+            "why does {q}"
+          ]
+        },
+        {
+          "name": "HowIntent",
+          "slots": [
+            { "name": "q", "type": "AMAZON.SearchQuery" }
+          ],
+          "samples": [
+            "how {q}",
+            "how does {q}",
+            "how do {q}",
+            "how is {q}",
+            "how does {q} work"
+          ]
+        },
+        {
+          "name": "ExplainIntent",
+          "slots": [
+            { "name": "q", "type": "AMAZON.SearchQuery" }
+          ],
+          "samples": [
+            "explain {q}",
+            "explain {q} simply",
+            "tell me about {q}",
+            "tell me {q}"
+          ]
+        },
+        {
+          "name": "DefineIntent",
+          "slots": [
+            { "name": "q", "type": "AMAZON.SearchQuery" }
+          ],
+          "samples": [
+            "define {q}"
           ]
         },
         {

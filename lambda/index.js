@@ -305,7 +305,7 @@ function normalizeModelName(name) {
   return name.startsWith('models/') ? name.slice('models/'.length) : name;
 }
 
-async function callOpenAIAnswer({ question, notes, model = OPENAI_MODEL }) {
+async function callOpenAIAnswer({ question, notes, model = OPENAI_MODEL, totalBudgetMs = 1200 }) {
   if (!OPENAI_API_KEY) throw new Error('Missing OPENAI_API_KEY (env or lambda/gemini-key.js)');
   const host = 'api.openai.com';
   const path = '/v1/chat/completions';
@@ -340,7 +340,7 @@ async function callOpenAIAnswer({ question, notes, model = OPENAI_MODEL }) {
     };
     return httpRequest(options, Buffer.from(body), { timeoutMs, maxRedirects: 0 });
   }
-  const TOTAL_BUDGET_MS = 1200;
+  const TOTAL_BUDGET_MS = Math.max(400, Number(totalBudgetMs) || 1200);
   const startTs = Date.now();
   const chain = [model].concat(Array.isArray(OPENAI_FALLBACK_MODELS) ? OPENAI_FALLBACK_MODELS : []);
   for (const useModel of chain) {
@@ -375,7 +375,7 @@ async function callOpenAIAnswer({ question, notes, model = OPENAI_MODEL }) {
   throw new Error('OpenAI HTTP 503');
 }
 
-async function callGeminiAnswer({ question, audioBase64, notes, model = GEMINI_MODEL }) {
+async function callGeminiAnswer({ question, hint, audioBase64, notes, model = GEMINI_MODEL, totalBudgetMs = 6000 }) {
   if (!GEMINI_API_KEY) {
     throw new Error('Missing GEMINI_API_KEY (env or lambda/gemini-key.js)');
   }
@@ -405,7 +405,7 @@ async function callGeminiAnswer({ question, audioBase64, notes, model = GEMINI_M
     }
     return parts;
   }
-  const parts = buildGeminiParts({ q: question, hint: question, episodeNotes: notes, audio: audioBase64 });
+  const parts = buildGeminiParts({ q: question, hint, episodeNotes: notes, audio: audioBase64 });
   if (audioBase64 && typeof audioBase64 === 'object' && (audioBase64.recent || audioBase64.upcoming)) {
     if (audioBase64.recent) {
       parts.push({ text: 'Recent audio snippet (~last 75 seconds):' });
@@ -447,7 +447,7 @@ async function callGeminiAnswer({ question, audioBase64, notes, model = GEMINI_M
     return res;
   }
   // Attempt chain with front-loaded timeout for first attempt
-  const TOTAL_BUDGET_MS = 6800;
+  const TOTAL_BUDGET_MS = Math.max(1200, Number(totalBudgetMs) || 6000);
   const startTs = Date.now();
   const chain = [model].concat(Array.isArray(GEMINI_FALLBACK_MODELS) ? GEMINI_FALLBACK_MODELS : []);
   for (let idx = 0; idx < chain.length; idx++) {
@@ -458,7 +458,8 @@ async function callGeminiAnswer({ question, audioBase64, notes, model = GEMINI_M
       const elapsed = Date.now() - startTs;
       const remaining = Math.max(0, TOTAL_BUDGET_MS - elapsed);
       if (remaining < 400) break; // not enough time left
-      const desired = idx === 0 ? 4500 : (idx === 1 ? 1500 : 1200);
+      // First attempt ~2.5s, subsequent share remaining
+      const desired = idx === 0 ? 2500 : 1800;
       const timeoutMs = Math.max(700, Math.min(desired, remaining - 200));
       let res;
       try {
@@ -487,22 +488,26 @@ async function callGeminiAnswer({ question, audioBase64, notes, model = GEMINI_M
   throw new Error('Gemini HTTP 503');
 }
 
-async function getAnswer({ question, audioBase64, notes }) {
+async function getAnswer({ question, audioBase64, notes, hint, budgetMs = 6000 }) {
   // Prefer Gemini (grounding off) when key is present
+  const start = Date.now();
   if (GEMINI_API_KEY) {
     try {
-      return await callGeminiAnswer({ question, audioBase64, notes, model: GEMINI_MODEL });
+      return await callGeminiAnswer({ question, hint, audioBase64, notes, model: GEMINI_MODEL, totalBudgetMs: budgetMs });
     } catch (e) {
       console.error('Gemini chain failed', (e && e.message) || String(e));
     }
   }
-  // Fallback to OpenAI when key present
-  if (OPENAI_API_KEY) {
+  // Fallback to OpenAI when key present and enough budget remains
+  const remaining = Math.max(0, budgetMs - (Date.now() - start));
+  if (OPENAI_API_KEY && remaining >= 1500) {
     try {
-      return await callOpenAIAnswer({ question, notes, model: OPENAI_MODEL });
+      return await callOpenAIAnswer({ question: hint || question, notes, model: OPENAI_MODEL, totalBudgetMs: Math.min(1200, remaining) });
     } catch (e) {
       console.error('OpenAI chain failed', (e && e.message) || String(e));
     }
+  } else if (OPENAI_API_KEY) {
+    console.log('Skipping OpenAI due to low remaining budget:', remaining, 'ms');
   }
   // Neither provider configured
   console.error('Answer provider unavailable: GEMINI_API_KEY missing and OPENAI_API_KEY missing');
@@ -702,7 +707,7 @@ const PlayPodcastIntentHandler = {
   }
 };
 
-async function handleOpenQuestion(handlerInput, questionFromUser) {
+async function handleOpenQuestion(handlerInput, questionFromUser, carrierWord) {
   const { requestEnvelope } = handlerInput;
   const attributesManager = handlerInput.attributesManager;
   const playerActivity = requestEnvelope.context?.AudioPlayer?.playerActivity || 'IDLE';
@@ -724,6 +729,7 @@ async function handleOpenQuestion(handlerInput, questionFromUser) {
         .reprompt('What would you like to know?')
         .getResponse();
     }
+    const qaStart = Date.now();
     // Helper: time-bound any async step
     const withTimeout = (p, ms, label) => {
       let t;
@@ -771,14 +777,29 @@ async function handleOpenQuestion(handlerInput, questionFromUser) {
       }
     }
     const answerCaller = (typeof global.__overrideGetAnswer === 'function') ? global.__overrideGetAnswer : getAnswer;
-    answer = await answerCaller({
-      question: qText,
-      audioBase64,
-      notes: state.lastNotes || ''
-    });
+    const QA_TOTAL_MS = 6000;
+    const elapsed = Date.now() - qaStart;
+    const remainingForLLM = Math.max(800, QA_TOTAL_MS - elapsed);
+    const hint = carrierWord ? `${carrierWord} ${qText}` : qText;
+    // Bound the entire answer generation to remainingForLLM
+    answer = await withTimeout(
+      answerCaller({
+        question: qText,
+        hint,
+        audioBase64,
+        notes: state.lastNotes || '',
+        budgetMs: remainingForLLM
+      }),
+      Math.max(700, remainingForLLM - 100),
+      'getAnswer'
+    );
   } catch (err) {
     console.error('OpenQuestion error:', err);
-    answer = 'Sorry, I could not analyze that just now.';
+    if ((err && String(err).includes('getAnswer')) || (err && String(err).includes('timed out'))) {
+      answer = 'Sorry, that took too long. Try asking again.';
+    } else {
+      answer = 'Sorry, I could not analyze that just now.';
+    }
   }
 
   // Log question and confirm once
@@ -838,9 +859,33 @@ const OpenQuestionIntentHandler = {
     const slots = handlerInput.requestEnvelope?.request?.intent?.slots || {};
     const qRaw = Alexa.getSlotValue(handlerInput.requestEnvelope, 'q') || (slots && slots.q && slots.q.value) || '';
     try { console.log('Slot q received:', String(qRaw || '').slice(0, 100)); } catch {}
-    return handleOpenQuestion(handlerInput, qRaw);
+    return handleOpenQuestion(handlerInput, qRaw, null);
   }
 };
+
+// Proxy handlers to capture the carrier/wh-word and delegate
+function makeCarrierHandler(intentName, carrierWord) {
+  return {
+    canHandle(handlerInput) {
+      const type = Alexa.getRequestType(handlerInput.requestEnvelope);
+      if (type !== 'IntentRequest') return false;
+      const name = Alexa.getIntentName(handlerInput.requestEnvelope) || '';
+      return name === intentName;
+    },
+    async handle(handlerInput) {
+      const slots = handlerInput.requestEnvelope?.request?.intent?.slots || {};
+      const qRaw = Alexa.getSlotValue(handlerInput.requestEnvelope, 'q') || (slots && slots.q && slots.q.value) || '';
+      try { console.log(`${intentName} slot q:`, String(qRaw || '').slice(0, 100)); } catch {}
+      return handleOpenQuestion(handlerInput, qRaw, carrierWord);
+    }
+  };
+}
+const WhoIntentHandler = makeCarrierHandler('WhoIntent', 'who is');
+const WhatIntentHandler = makeCarrierHandler('WhatIntent', 'what is');
+const WhyIntentHandler = makeCarrierHandler('WhyIntent', 'why is');
+const HowIntentHandler = makeCarrierHandler('HowIntent', 'how');
+const ExplainIntentHandler = makeCarrierHandler('ExplainIntent', 'explain');
+const DefineIntentHandler = makeCarrierHandler('DefineIntent', 'define');
 
 const PauseIntentHandler = {
   canHandle(handlerInput) {
@@ -1108,6 +1153,12 @@ exports.handler = skillBuilder
   .addRequestHandlers(
     LaunchRequestHandler,
     PlayPodcastIntentHandler,
+    WhoIntentHandler,
+    WhatIntentHandler,
+    WhyIntentHandler,
+    HowIntentHandler,
+    ExplainIntentHandler,
+    DefineIntentHandler,
     AskAboutIntentHandler,
     OpenQuestionIntentHandler,
     PauseIntentHandler,
