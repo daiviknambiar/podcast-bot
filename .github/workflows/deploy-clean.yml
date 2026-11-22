@@ -320,3 +320,27 @@ jobs:
           });
           req.end(body);
           NODE
+
+      - name: Answer smoke test (ungrounded, no secrets)
+        run: |
+          node - <<'NODE'
+          let key;
+          try { key = require('./lambda/gemini-key.js').GEMINI_API_KEY; } catch {}
+          if (!key || String(key).trim().length === 0) {
+            console.log('ANSWER_SMOKE: key missing, skipping');
+            process.exit(0);
+          }
+          const skill = require('./lambda/index.js');
+          const start = Date.now();
+          const q = 'who is the CEO of Anthropic';
+          Promise.resolve(skill._answerForSmoke(q)).then((txt) => {
+            const ms = Date.now() - start;
+            const t = String(txt || '').replace(/\\s+/g,' ').trim();
+            if (!t) { console.log(`ANSWER_SMOKE: empty latencyMs=${ms}`); process.exit(1); }
+            console.log(`ANSWER_SMOKE: ok latencyMs=${ms} text=${JSON.stringify(t.slice(0,120))}`);
+          }).catch((e) => {
+            const ms = Date.now() - start;
+            console.log(`ANSWER_SMOKE: error latencyMs=${ms} err=${JSON.stringify(e && e.message || String(e))}`);
+            process.exit(1);
+          });
+          NODE

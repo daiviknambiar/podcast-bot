@@ -22,6 +22,9 @@ let OPENAI_API_KEY = process.env.OPENAI_API_KEY || null;
 let PODBOT_WEBHOOK_URL = process.env.PODBOT_WEBHOOK_URL || null;
 let PODBOT_WEBHOOK_KEY = process.env.PODBOT_WEBHOOK_KEY || null;
 let PODBOT_AUTH_HEADER = process.env.PODBOT_AUTH_HEADER || 'Authorization';
+// Soft-cache flags for quota/feature availability in this container
+let GROUNDING_BLOCKED_UNTIL_TS = 0; // ms epoch
+let OPENAI_BLOCKED_UNTIL_TS = 0; // ms epoch
 try {
   // Loaded at deploy-time by the workflow; never committed
   // module.exports = { GEMINI_API_KEY: '...' }
@@ -308,6 +311,9 @@ function normalizeModelName(name) {
 
 async function callOpenAIAnswer({ question, notes, model = OPENAI_MODEL, totalBudgetMs = 1200 }) {
   if (!OPENAI_API_KEY) throw new Error('Missing OPENAI_API_KEY (env or lambda/gemini-key.js)');
+  if (Date.now() < OPENAI_BLOCKED_UNTIL_TS) {
+    throw new Error('OpenAI blocked');
+  }
   const host = 'api.openai.com';
   const path = '/v1/chat/completions';
   const systemPrompt =
@@ -370,7 +376,11 @@ async function callOpenAIAnswer({ question, notes, model = OPENAI_MODEL, totalBu
     } else {
       const bodyTxt = (res.body || Buffer.from('')).toString('utf8').slice(0, 300);
       console.error('OpenAI non-2xx', { model: useModel, status: res.statusCode, body: bodyTxt });
-      if (res.statusCode === 429 || res.statusCode === 404) continue;
+      if (res.statusCode === 429) {
+        OPENAI_BLOCKED_UNTIL_TS = Date.now() + 60 * 60 * 1000; // 1 hour soft block
+        break;
+      }
+      if (res.statusCode === 404) continue;
     }
   }
   throw new Error('OpenAI HTTP 503');
@@ -386,7 +396,7 @@ async function callGeminiAnswer({ question, hint, audioBase64, notes, model = GE
     const guidance =
       'You are PodBot. Answer concisely in 1–2 spoken sentences. No markdown, no links.\n' +
       '- If the user\'s question is about this specific episode, the podcast, or the hosts, or uses pronouns like "they", "this", "that", or "it", then use the episode audio snippets and notes below as context.\n' +
-      '- Otherwise, treat it as a general-knowledge question and answer directly without recapping the episode unless it is directly relevant.\n';
+      '- Otherwise, treat it as a general-knowledge question and answer directly without recapping the episode unless it is directly relevant. If the information is time-sensitive and you are not certain, briefly say you may not have the latest.\n';
     const asked =
       (q ? `The user asked (wh-word may be missing): ${q}\n` : '') +
       (hint && hint !== q ? `Utterance hint: ${hint}\n` : '');
@@ -453,7 +463,7 @@ async function callGeminiAnswer({ question, hint, audioBase64, notes, model = GE
   const chain = [model].concat(Array.isArray(GEMINI_FALLBACK_MODELS) ? GEMINI_FALLBACK_MODELS : []);
   for (let idx = 0; idx < chain.length; idx++) {
     const useModel = chain[idx];
-    const tryGroundingFirst = preferGrounding || !!ENABLE_GOOGLE_GROUNDING;
+    const tryGroundingFirst = (preferGrounding || !!ENABLE_GOOGLE_GROUNDING) && (Date.now() >= GROUNDING_BLOCKED_UNTIL_TS);
     const attemptGrounding = tryGroundingFirst ? [true, false] : [false];
     for (const withGrounding of attemptGrounding) {
       const elapsed = Date.now() - startTs;
@@ -480,9 +490,15 @@ async function callGeminiAnswer({ question, hint, audioBase64, notes, model = GE
       }
       const bodyTxt = (res.body || Buffer.from('')).toString('utf8').slice(0, 600);
       console.error('Gemini attempt non-2xx', { model: useModel, grounding: withGrounding, status: res.statusCode, body: bodyTxt });
-      if (res.statusCode === 429 || res.statusCode === 404) {
-        // Skip to next model immediately on quota or not found
-        break;
+      if (res.statusCode === 404) break; // skip to next model
+      if (res.statusCode === 429 || res.statusCode === 403 || res.statusCode === 400) {
+        if (withGrounding) {
+          // Cache that grounding is unavailable and try ungrounded immediately
+          GROUNDING_BLOCKED_UNTIL_TS = Date.now() + 60 * 60 * 1000; // 1 hour soft block
+          continue; // move to ungrounded attempt
+        } else {
+          break; // move to next model
+        }
       }
       // otherwise, try without grounding (if not already), then continue/fallback
     }
@@ -741,7 +757,7 @@ async function handleOpenQuestion(handlerInput, questionFromUser, carrierWord) {
   const { requestEnvelope } = handlerInput;
   const attributesManager = handlerInput.attributesManager;
   const playerActivity = requestEnvelope.context?.AudioPlayer?.playerActivity || 'IDLE';
-  const wasPlaying = playerActivity === 'PLAYING';
+  const wasPlaying = ['PLAYING', 'PAUSED', 'STOPPED'].includes(playerActivity);
   const state = await getState(attributesManager);
   const url = state.lastUrl;
   const offsetMs = getLatestOffsetMs(requestEnvelope, state);
@@ -1405,6 +1421,11 @@ if (process.env.NODE_ENV === 'test') {
     }
   };
 }
+// CI helper: ungrounded quick answer call (no secrets printed)
+module.exports._answerForSmoke = async (q) => {
+  const txt = await getAnswer({ question: q, audioBase64: null, notes: '', hint: q, budgetMs: 2500, preferGrounding: false });
+  return String(txt || '').slice(0, 200);
+};
 
 // Ensure Lambda returns promptly and doesn't wait for open timers/sockets
 const _skillLambda = exports.handler;
