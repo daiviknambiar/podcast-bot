@@ -63,6 +63,11 @@ jobs:
       - name: Configure Git credential helper for ASK
         run: git config --global credential.helper '!ask util git-credentials-helper'
 
+      - name: Configure Git user (for throwaway commit)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
       - name: "Write lambda/gemini-key.js (throwaway deploy commit)"
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -73,7 +78,7 @@ jobs:
         run: |
           node -e "const fs=require('fs');const t=v=>(String(v||'').trim().replace(/^['\"]|['\"]$/g,''));const data={GEMINI_API_KEY:t(process.env.GEMINI_API_KEY),OPENAI_API_KEY:t(process.env.OPENAI_API_KEY),PODBOT_WEBHOOK_URL:t(process.env.PODBOT_WEBHOOK_URL),PODBOT_WEBHOOK_KEY:t(process.env.PODBOT_WEBHOOK_KEY),PODBOT_AUTH_HEADER:t(process.env.PODBOT_AUTH_HEADER||'Authorization')};const lines=['module.exports = {'];for(const[k,v]of Object.entries(data)){lines.push(`  ${k}: ${JSON.stringify(v)},`);}lines.push('};');fs.mkdirSync('lambda',{recursive:true});fs.writeFileSync('lambda/gemini-key.js',lines.join('\n'));"
           git add -f lambda/gemini-key.js
-          git commit -m "deploy: inject runtime secrets [throwaway]" || true
+          git commit -m "deploy: inject runtime secrets [throwaway]"
 
       - name: Push to Alexa Hosted via helper
         id: push_helper
