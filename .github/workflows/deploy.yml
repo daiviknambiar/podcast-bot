@@ -210,7 +210,10 @@ jobs:
           LAT=$((END-START))
           TXT="$(jq -r '.candidates[0].content.parts[]?.text? // empty' /tmp/e2e.out 2>/dev/null | tr '\n' ' ' | sed -E 's/  +/ /g' | head -c 80)"
           ERR="$(jq -r '.error.message? // empty' /tmp/e2e.out 2>/dev/null | head -c 120)"
-          echo "E2E: $MODEL -> $STATUS, ${LAT:-?} ms, ${(TXT:+\"$TXT\")}${ERR:+$ERR}"
+          STATUS="${STATUS:-000}"
+          LAT="${LAT:-?}"
+          if [ -n "$TXT" ]; then SNIP="$TXT"; else SNIP="$ERR"; fi
+          echo "E2E: $MODEL -> $STATUS, $LAT ms, ${SNIP}"
 
       - name: Resolve Alexa Hosted repository URL
         id: hosted
