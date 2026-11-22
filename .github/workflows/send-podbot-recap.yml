@@ -78,16 +78,19 @@ jobs:
             "${PODBOT_WEBHOOK_URL}")"
           if [ "$STATUS" = "401" ]; then
             # Try common alternate headers
-            for H in "X-PodBot-Key" "X-Api-Key" "Authorization: Bearer ${PODBOT_WEBHOOK_KEY}"; do
-              if echo "$H" | grep -q '^Authorization:'; then
-                STATUS="$(curl -sS -o /dev/null -w "%{http_code}" \
-                  -H "$H" -H "Content-Type: application/json" \
-                  --data-binary @recaps/recap.json "${PODBOT_WEBHOOK_URL}")"
-              else
-                STATUS="$(curl -sS -o /dev/null -w "%{http_code}" \
-                  -H "$H: ${PODBOT_WEBHOOK_KEY}" -H "Content-Type: application/json" \
-                  --data-binary @recaps/recap.json "${PODBOT_WEBHOOK_URL}")"
-              fi
+            for H in "X-PodBot-Key" "X-Podbot-Key" "X-PodBot-Auth" "X-Podbot-Auth" "X-API-Key" "X-Api-Key"; do
+              STATUS="$(curl -sS -o /dev/null -w "%{http_code}" \
+                -H "$H: ${PODBOT_WEBHOOK_KEY}" -H "Content-Type: application/json" \
+                --data-binary @recaps/recap.json "${PODBOT_WEBHOOK_URL}")"
+              [ "$STATUS" != "401" ] && break
+            done
+          fi
+          if [ "$STATUS" = "401" ]; then
+            # Try Authorization schemes
+            for SCHEME in "Bearer" "Key" "Token"; do
+              STATUS="$(curl -sS -o /dev/null -w "%{http_code}" \
+                -H "Authorization: ${SCHEME} ${PODBOT_WEBHOOK_KEY}" -H "Content-Type: application/json" \
+                --data-binary @recaps/recap.json "${PODBOT_WEBHOOK_URL}")"
               [ "$STATUS" != "401" ] && break
             done
           fi
