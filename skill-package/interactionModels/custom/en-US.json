@@ -1,9 +1,9 @@
 {
   "interactionModel": {
-    "modelConfiguration": {
-      "fallbackIntentSensitivity": { "level": "LOW" }
-    },
     "languageModel": {
+      "modelConfiguration": {
+        "fallbackIntentSensitivity": { "level": "LOW" }
+      },
       "invocationName": "pod bot",
       "intents": [
         {
@@ -30,7 +30,6 @@
           ],
           "samples": [
             "what is {q}",
-            "what's {q}",
             "what are {q}",
             "who is {q}",
             "who was {q}",

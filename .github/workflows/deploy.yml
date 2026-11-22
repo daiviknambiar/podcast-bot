@@ -327,11 +327,40 @@ jobs:
         run: |
           ask smapi update-skill-manifest -s "$SKILL_ID" --stage development --manifest file:skill-package/skill.json --profile default
 
-      - name: Update interaction model via SMAPI (en-US)
+      - name: Update interaction model via SMAPI (en-US; print 400 body)
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
-        continue-on-error: true
         run: |
-          ask smapi set-interaction-model -s "$SKILL_ID" --stage development --locale en-US --interaction-model file:skill-package/interactionModels/custom/en-US.json --profile default
+          FILE="skill-package/interactionModels/custom/en-US.json"
+          echo "Planned fallbackIntentSensitivity in payload:"
+          jq -r '.interactionModel.languageModel.modelConfiguration.fallbackIntentSensitivity.level? // "<unset>"' "$FILE"
+          set +e
+          OUT_STD="$(mktemp)"; OUT_ERR="$(mktemp)"
+          ask smapi set-interaction-model -s "$SKILL_ID" --stage development --locale en-US --interaction-model "file:$FILE" --profile default 1>"$OUT_STD" 2>"$OUT_ERR"
+          RET=$?
+          set -e
+          if [ $RET -ne 0 ]; then
+            echo "::warning title=SMAPI set-interaction-model failed::Printing ASK CLI stderr (message wrapper) below."
+            cat "$OUT_ERR" || true
+            echo "Attempting raw SMAPI PUT to capture full 400 body..."
+            TOK_JSON="$(ask util generate-lwa-tokens --no-browser --profile default 2>/dev/null || true)"
+            ACCESS_TOKEN="$(echo "$TOK_JSON" | jq -r '.access_token? // empty')"
+            if [ -n "$ACCESS_TOKEN" ]; then
+              HTTP_STATUS=$(curl -sS -w "%{http_code}" -o /tmp/smapi_body.out -X PUT \
+                -H "Authorization: Bearer $ACCESS_TOKEN" -H "Content-Type: application/json" \
+                --data-binary "@$FILE" \
+                "https://api.amazonalexa.com/v1/skills/${SKILL_ID}/stages/development/interactionModel/locales/en-US" || true)
+              echo "Raw SMAPI PUT status: $HTTP_STATUS"
+              echo "Raw SMAPI response body:"
+              cat /tmp/smapi_body.out || true
+              if [ "$HTTP_STATUS" != "202" ]; then
+                echo "::error title=Interaction model update failed::Raw SMAPI PUT did not return 202. See body above."
+                exit 1
+              fi
+            else
+              echo "::error title=Token error::Could not obtain access token to fetch full 400 body."
+              exit 1
+            fi
+          fi
 
       - name: Poll interaction model build status (fail on error)
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
@@ -352,6 +381,14 @@ jobs:
             n=$((n+1))
             sleep 5
           done
+          if [ "$MODEL_STATUS" != "SUCCEEDED" ]; then
+            echo "::error title=Interaction model build unknown::No SUCCEEDED status observed within timeout."
+            exit 1
+          fi
+
+      - name: Wait for model propagation
+        if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
+        run: sleep 30
 
       - name: Confirm invocation name
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
@@ -365,7 +402,7 @@ jobs:
           echo "Live OpenQuestionIntent block:"
           echo "$IM_JSON" | jq -r '.interactionModel.languageModel.intents[] | select(.name=="OpenQuestionIntent")'
           echo "Live fallbackIntentSensitivity level:"
-          echo "$IM_JSON" | jq -r '.interactionModel.modelConfiguration.fallbackIntentSensitivity.level? // "<unset>"'
+          echo "$IM_JSON" | jq -r '.interactionModel.languageModel.modelConfiguration.fallbackIntentSensitivity.level? // "<unset>"'
 
       - name: Check hosted skill deployment status
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
@@ -416,49 +453,69 @@ jobs:
           CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H "Authorization: $PODBOT_WEBHOOK_KEY" --data "$BODY" "$PODBOT_WEBHOOK_URL")"
           echo "Test POST status: $CODE"
 
-      - name: Simulate skill (open)
+      - name: Simulate skill (Q&A) with retries
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
         run: |
-          SIM_JSON="$(ask smapi simulate-skill -s "$SKILL_ID" --stage development --device-locale en-US --input-content 'open pod bot' --profile default || true)"
-          echo "$SIM_JSON" | jq -r '.'
-
-      - name: Simulate skill (Q&A)
-        if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
-        run: |
-          SIM_JSON="$(ask smapi simulate-skill -s "$SKILL_ID" --stage development --device-locale en-US --input-content 'ask pod bot what is a webhook' --profile default || true)"
-          SID="$(echo "$SIM_JSON" | jq -r '.id? // empty')"
-          echo "Simulation id: ${SID:-<none>}"
-          if [ -n "$SID" ]; then
-            for i in $(seq 1 18); do
-              OUT="$(ask smapi get-skill-simulation -s "$SKILL_ID" --simulation-id "$SID" --profile default || true)"
-              STATUS="$(echo "$OUT" | jq -r '.status? // empty')"
-              echo "Simulation status: ${STATUS:-<unknown>}"
-              if [ "$STATUS" = "SUCCESSFUL" ] || [ "$STATUS" = "FAILED" ]; then
-                echo "$OUT" | jq -r '{intentName: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationRequest?.body?.request?.intent?.name, slots: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationRequest?.body?.request?.intent?.slots, outputSpeech: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationResponse?.body?.response?.outputSpeech}'
-                break
+          attempt_sim () {
+            local INPUT="$1"
+            local TRY=0
+            local SID=""
+            while [ $TRY -lt 5 ]; do
+              TRY=$((TRY+1))
+              SIM_JSON="$(ask smapi simulate-skill -s "$SKILL_ID" --stage development --device-locale en-US --input-content "$INPUT" --profile default || true)"
+              SID="$(echo "$SIM_JSON" | jq -r '.id? // empty')"
+              echo "Simulation try $TRY id: ${SID:-<none>}"
+              if [ -n "$SID" ]; then
+                for i in $(seq 1 20); do
+                  OUT="$(ask smapi get-skill-simulation -s "$SKILL_ID" --simulation-id "$SID" --profile default || true)"
+                  STATUS="$(echo "$OUT" | jq -r '.status? // empty')"
+                  echo "Simulation status: ${STATUS:-<unknown>}"
+                  if [ "$STATUS" = "SUCCESSFUL" ] || [ "$STATUS" = "FAILED" ]; then
+                    echo "$OUT" | jq -r '{intentName: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationRequest?.body?.request?.intent?.name, slots: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationRequest?.body?.request?.intent?.slots, outputSpeech: (.result?.alexaExecutionInfo?.skillExecutionInfo?.invocationResponse?.body?.response?.outputSpeech // {})}'
+                    return 0
+                  fi
+                  sleep 2
+                done
               fi
-              sleep 2
+              echo "No simulation id or not ready; backing off 15s..."
+              sleep 15
             done
-          fi
+            echo "::error title=Simulation failed::Could not obtain a successful simulation result after retries for input: $INPUT"
+            return 1
+          }
+          attempt_sim "ask pod bot what is a webhook"
 
-      - name: Simulate skill (Q&A sky)
+      - name: Simulate skill (Q&A sky) with retries
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
         run: |
-          SIM_JSON="$(ask smapi simulate-skill -s "$SKILL_ID" --stage development --device-locale en-US --input-content 'ask pod bot why is the sky blue' --profile default || true)"
-          SID="$(echo "$SIM_JSON" | jq -r '.id? // empty')"
-          echo "Simulation id: ${SID:-<none>}"
-          if [ -n "$SID" ]; then
-            for i in $(seq 1 18); do
-              OUT="$(ask smapi get-skill-simulation -s "$SKILL_ID" --simulation-id "$SID" --profile default || true)"
-              STATUS="$(echo "$OUT" | jq -r '.status? // empty')"
-              echo "Simulation status: ${STATUS:-<unknown>}"
-              if [ "$STATUS" = "SUCCESSFUL" ] || [ "$STATUS" = "FAILED" ]; then
-                echo "$OUT" | jq -r '{intentName: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationRequest?.body?.request?.intent?.name, slots: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationRequest?.body?.request?.intent?.slots, outputSpeech: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationResponse?.body?.response?.outputSpeech}'
-                break
+          attempt_sim () {
+            local INPUT="$1"
+            local TRY=0
+            local SID=""
+            while [ $TRY -lt 5 ]; do
+              TRY=$((TRY+1))
+              SIM_JSON="$(ask smapi simulate-skill -s "$SKILL_ID" --stage development --device-locale en-US --input-content "$INPUT" --profile default || true)"
+              SID="$(echo "$SIM_JSON" | jq -r '.id? // empty')"
+              echo "Simulation try $TRY id: ${SID:-<none>}"
+              if [ -n "$SID" ]; then
+                for i in $(seq 1 20); do
+                  OUT="$(ask smapi get-skill-simulation -s "$SKILL_ID" --simulation-id "$SID" --profile default || true)"
+                  STATUS="$(echo "$OUT" | jq -r '.status? // empty')"
+                  echo "Simulation status: ${STATUS:-<unknown>}"
+                  if [ "$STATUS" = "SUCCESSFUL" ] || [ "$STATUS" = "FAILED" ]; then
+                    echo "$OUT" | jq -r '{intentName: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationRequest?.body?.request?.intent?.name, slots: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationRequest?.body?.request?.intent?.slots, outputSpeech: (.result?.alexaExecutionInfo?.skillExecutionInfo?.invocationResponse?.body?.response?.outputSpeech // {})}'
+                    return 0
+                  fi
+                  sleep 2
+                done
               fi
-              sleep 2
+              echo "No simulation id or not ready; backing off 15s..."
+              sleep 15
             done
-          fi
+            echo "::error title=Simulation failed::Could not obtain a successful simulation result after retries for input: $INPUT"
+            return 1
+          }
+          attempt_sim "ask pod bot why is the sky blue"
 
       - name: Report CodeCommit dev HEAD
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
