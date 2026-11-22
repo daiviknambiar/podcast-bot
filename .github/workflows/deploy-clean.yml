@@ -52,7 +52,14 @@ jobs:
       - name: Resolve Alexa Hosted repository URL
         id: hosted
         run: |
-          REPO_URL="$(ask smapi get-alexa-hosted-skill-metadata -s "$SKILL_ID" --profile default | jq -r '.alexaHosted.repository.url')"
+          ATTEMPTS=0
+          REPO_URL=""
+          until [ $ATTEMPTS -ge 3 ]; do
+            REPO_URL="$(ask smapi get-alexa-hosted-skill-metadata -s "$SKILL_ID" --profile default | jq -r '.alexaHosted.repository.url')"
+            if [ -n "$REPO_URL" ] && [ "$REPO_URL" != "null" ]; then break; fi
+            ATTEMPTS=$((ATTEMPTS+1))
+            sleep $((2*ATTEMPTS))
+          done
           if [ -z "$REPO_URL" ] || [ "$REPO_URL" = "null" ]; then
             echo "::error title=Hosted repo not found::Could not obtain Alexa Hosted repository URL for $SKILL_ID."
             exit 1
