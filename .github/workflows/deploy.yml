@@ -74,7 +74,8 @@ jobs:
         run: node --check lambda/index.js
 
       - name: Run unit test for PlayPodcastIntent (empty slot)
-        run: node lambda/scripts/test-play.js
+        working-directory: lambda
+        run: node scripts/test-play.js
 
       - name: Create ASK CLI profile config (~/.ask/cli_config)
         env:
@@ -323,6 +324,8 @@ jobs:
           git show origin/dev:lambda/config.js | grep -n GEMINI || true
           echo "Logging interceptor in origin/dev lambda/index.js:"
           git show origin/dev:lambda/index.js | grep -n 'LoggingRequestInterceptor' || true
+          echo "PlayPodcast fix presence in origin/dev lambda/index.js:"
+          git show origin/dev:lambda/index.js | grep -n 'PlayPodcast resolved:' || true
 
       - name: Fetch live manifest (development)
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
