@@ -381,13 +381,31 @@ async function callGeminiAnswer({ question, audioBase64, notes, model = GEMINI_M
   }
   const host = 'generativelanguage.googleapis.com';
   const pathFor = (m) => `/v1beta/models/${encodeURIComponent(normalizeModelName(m))}:generateContent`;
-  const basePrompt =
-    `You are PodBot, an assistant that answers spoken questions clearly. ` +
-    `Answer briefly in 2–4 spoken sentences, no markdown. ` +
-    `Use the recent podcast snippet and episode notes if relevant, but do not limit yourself to them. ` +
-    `You may use general knowledge to answer accurately.` +
-    (notes ? ` Episode notes (may be incomplete): ${notes.slice(0, 1200)}.` : '');
-  const parts = [{ text: basePrompt + (question ? ` Question: ${question}` : '') }];
+  function buildGeminiParts({ q, hint, episodeNotes, audio }) {
+    const guidance =
+      'You are PodBot. Answer concisely in 1–2 spoken sentences. No markdown, no links.\n' +
+      '- If the user\'s question is about this specific episode, the podcast, or the hosts, or uses pronouns like "they", "this", "that", or "it", then use the episode audio snippets and notes below as context.\n' +
+      '- Otherwise, treat it as a general-knowledge question and answer directly without recapping the episode unless it is directly relevant.\n';
+    const asked =
+      (q ? `The user asked (wh-word may be missing): ${q}\n` : '') +
+      (hint && hint !== q ? `Utterance hint: ${hint}\n` : '');
+    const notesText = episodeNotes ? `Episode notes (may be incomplete): ${episodeNotes.slice(0, 1200)}\n` : '';
+    const parts = [{ text: guidance + asked + notesText }];
+    if (audio && typeof audio === 'object' && (audio.recent || audio.upcoming)) {
+      if (audio.recent) {
+        parts.push({ text: 'Recent audio snippet (~last 75 seconds):' });
+        parts.push({ inlineData: { mimeType: 'audio/mpeg', data: audio.recent } });
+      }
+      if (audio.upcoming) {
+        parts.push({ text: 'Upcoming audio snippet (~next 90 seconds):' });
+        parts.push({ inlineData: { mimeType: 'audio/mpeg', data: audio.upcoming } });
+      }
+    } else if (audio) {
+      parts.push({ inlineData: { mimeType: 'audio/mpeg', data: audio } });
+    }
+    return parts;
+  }
+  const parts = buildGeminiParts({ q: question, hint: question, episodeNotes: notes, audio: audioBase64 });
   if (audioBase64 && typeof audioBase64 === 'object' && (audioBase64.recent || audioBase64.upcoming)) {
     if (audioBase64.recent) {
       parts.push({ text: 'Recent audio snippet (~last 75 seconds):' });
@@ -405,7 +423,7 @@ async function callGeminiAnswer({ question, audioBase64, notes, model = GEMINI_M
       contents: [{ role: 'user', parts }],
       generationConfig: {
         temperature: 0.2,
-        maxOutputTokens: 180
+        maxOutputTokens: 120
       }
     };
     if (withGrounding) {
