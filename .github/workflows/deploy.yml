@@ -361,6 +361,10 @@ jobs:
           if [ "$INVOKATION" != "pod bot" ]; then
             echo "::warning title=Invocation name differs::Observed invocation='$INVOKATION' (expected 'pod bot')."
           fi
+          echo "Live OpenQuestionIntent block:"
+          echo "$IM_JSON" | jq -r '.interactionModel.languageModel.intents[] | select(.name=="OpenQuestionIntent")'
+          echo "Live fallbackIntentSensitivity level:"
+          echo "$IM_JSON" | jq -r '.interactionModel.modelConfiguration.fallbackIntentSensitivity.level? // "<unset>"'
 
       - name: Check hosted skill deployment status
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
@@ -414,14 +418,46 @@ jobs:
       - name: Simulate skill (open)
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
         run: |
-          SIM_JSON="$(ask smapi simulate-skill -s "$SKILL_ID" --stage development --locale en-US --device-locale en-US --input-content 'open pod bot' --profile default || true)"
+          SIM_JSON="$(ask smapi simulate-skill -s "$SKILL_ID" --stage development --device-locale en-US --input-content 'open pod bot' --profile default || true)"
           echo "$SIM_JSON" | jq -r '.'
 
       - name: Simulate skill (Q&A)
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
         run: |
-          SIM_JSON="$(ask smapi simulate-skill -s "$SKILL_ID" --stage development --locale en-US --device-locale en-US --input-content 'ask pod bot what is a webhook' --profile default || true)"
-          echo "$SIM_JSON" | jq -r '.'
+          SIM_JSON="$(ask smapi simulate-skill -s "$SKILL_ID" --stage development --device-locale en-US --input-content 'ask pod bot what is a webhook' --profile default || true)"
+          SID="$(echo "$SIM_JSON" | jq -r '.id? // empty')"
+          echo "Simulation id: ${SID:-<none>}"
+          if [ -n "$SID" ]; then
+            for i in $(seq 1 18); do
+              OUT="$(ask smapi get-skill-simulation -s "$SKILL_ID" --simulation-id "$SID" --profile default || true)"
+              STATUS="$(echo "$OUT" | jq -r '.status? // empty')"
+              echo "Simulation status: ${STATUS:-<unknown>}"
+              if [ "$STATUS" = "SUCCESSFUL" ] || [ "$STATUS" = "FAILED" ]; then
+                echo "$OUT" | jq -r '{resolvedIntent: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationResponse?.body?.response?.directives? // empty, outputSpeech: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationResponse?.body?.response?.outputSpeech? // empty}'
+                break
+              fi
+              sleep 2
+            done
+          fi
+
+      - name: Simulate skill (Q&A sky)
+        if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
+        run: |
+          SIM_JSON="$(ask smapi simulate-skill -s "$SKILL_ID" --stage development --device-locale en-US --input-content 'ask pod bot why is the sky blue' --profile default || true)"
+          SID="$(echo "$SIM_JSON" | jq -r '.id? // empty')"
+          echo "Simulation id: ${SID:-<none>}"
+          if [ -n "$SID" ]; then
+            for i in $(seq 1 18); do
+              OUT="$(ask smapi get-skill-simulation -s "$SKILL_ID" --simulation-id "$SID" --profile default || true)"
+              STATUS="$(echo "$OUT" | jq -r '.status? // empty')"
+              echo "Simulation status: ${STATUS:-<unknown>}"
+              if [ "$STATUS" = "SUCCESSFUL" ] || [ "$STATUS" = "FAILED" ]; then
+                echo "$OUT" | jq -r '{resolvedIntent: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationResponse?.body?.response?.directives? // empty, outputSpeech: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationResponse?.body?.response?.outputSpeech? // empty}'
+                break
+              fi
+              sleep 2
+            done
+          fi
 
       - name: Report CodeCommit dev HEAD
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'

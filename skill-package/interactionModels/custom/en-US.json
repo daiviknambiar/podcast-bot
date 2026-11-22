@@ -1,5 +1,8 @@
 {
   "interactionModel": {
+    "modelConfiguration": {
+      "fallbackIntentSensitivity": { "level": "LOW" }
+    },
     "languageModel": {
       "invocationName": "pod bot",
       "intents": [
@@ -27,17 +30,27 @@
           ],
           "samples": [
             "what is {q}",
+            "what's {q}",
+            "what are {q}",
             "who is {q}",
+            "who was {q}",
             "why is {q}",
-            "tell me about {q}",
-            "explain {q} simply",
-            "what did they say about {q}",
+            "why do {q}",
+            "why does {q}",
+            "how does {q}",
+            "how do {q}",
+            "how is {q}",
             "how does {q} work",
-            "is {q} true",
-            "can you explain {q}",
-            "did {q} happen",
-            "when is {q}",
-            "where is {q}"
+            "tell me about {q}",
+            "explain {q}",
+            "explain {q} simply",
+            "question {q}",
+            "i have a question {q}",
+            "can you tell me {q}",
+            "what does {q} mean",
+            "define {q}",
+            "give me information about {q}",
+            "teach me about {q}"
           ]
         },
         {
