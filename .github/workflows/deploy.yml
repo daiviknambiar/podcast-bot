@@ -309,9 +309,9 @@ jobs:
             echo "password=$PASSWORD"
           } | git -c credential.helper="store --file $CRED_FILE" credential-store store
           rm -rf alexa-verify
-          git -c credential.helper="store --file $CRED_FILE" clone "$REPO_URL" alexa-verify
+          git -c credential.helper= -c credential.helper="store --file $CRED_FILE" clone "$REPO_URL" alexa-verify
           cd alexa-verify
-          git -c credential.helper="store --file $CRED_FILE" fetch origin
+          git -c credential.helper= -c credential.helper="store --file $CRED_FILE" fetch origin
           echo "origin/master HEAD: $(git log -1 --format=%H origin/master || true)"
           echo "origin/dev    HEAD: $(git log -1 --format=%H origin/dev || true)"
           echo "GEMINI lines in origin/dev lambda/config.js:"
