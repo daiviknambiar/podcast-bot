@@ -195,6 +195,23 @@ jobs:
             echo "$M -> $STATUS ${MSG:+- $MSG}"
           done
 
+      - name: E2E Gemini primary probe (why is the sky blue)
+        if: env.GEMINI_API_KEY != ''
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          MODEL="models/gemini-flash-lite-latest"
+          URL="https://generativelanguage.googleapis.com/v1beta/models/${MODEL#models/}:generateContent"
+          PROMPT="You are PodBot, an assistant that answers spoken questions clearly in 2–4 short sentences. No markdown."
+          BODY="$(jq -c -n --arg sys "$PROMPT" --arg q "Question: why is the sky blue" '{contents:[{role:"user",parts:[{text:($sys+" "+$q)}]}],generationConfig:{maxOutputTokens:180,temperature:0.2}}')"
+          START=$(date +%s%3N || true)
+          STATUS=$(curl -sS -m 5.0 -w "%{http_code}" -o /tmp/e2e.out -H "x-goog-api-key: ${GEMINI_API_KEY}" -H "Content-Type: application/json" -X POST -d "$BODY" "$URL" || true)
+          END=$(date +%s%3N || true)
+          LAT=$((END-START))
+          TXT="$(jq -r '.candidates[0].content.parts[]?.text? // empty' /tmp/e2e.out 2>/dev/null | tr '\n' ' ' | sed -E 's/  +/ /g' | head -c 80)"
+          ERR="$(jq -r '.error.message? // empty' /tmp/e2e.out 2>/dev/null | head -c 120)"
+          echo "E2E: $MODEL -> $STATUS, ${LAT:-?} ms, ${(TXT:+\"$TXT\")}${ERR:+$ERR}"
+
       - name: Resolve Alexa Hosted repository URL
         id: hosted
         run: |

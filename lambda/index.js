@@ -291,7 +291,7 @@ async function callOpenAIAnswer({ question, notes, model = OPENAI_MODEL }) {
   const userText =
     (question ? `Question: ${question}\n` : '') +
     (notes ? `Episode notes (may be incomplete): ${notes.slice(0, 1200)}` : '');
-  async function doCall({ useModel = model, timeoutMs = 2500 }) {
+  async function doCall({ useModel = model, timeoutMs = 1400 }) {
     const body = JSON.stringify({
       model: useModel,
       max_tokens: 200,
@@ -315,15 +315,14 @@ async function callOpenAIAnswer({ question, notes, model = OPENAI_MODEL }) {
     };
     return httpRequest(options, Buffer.from(body), { timeoutMs, maxRedirects: 0 });
   }
-  const TOTAL_BUDGET_MS = 6500;
-  const PER_REQUEST_TIMEOUT_MS = 2500;
+  const TOTAL_BUDGET_MS = 1200;
   const startTs = Date.now();
   const chain = [model].concat(Array.isArray(OPENAI_FALLBACK_MODELS) ? OPENAI_FALLBACK_MODELS : []);
   for (const useModel of chain) {
     const elapsed = Date.now() - startTs;
     const remaining = Math.max(0, TOTAL_BUDGET_MS - elapsed);
     if (remaining < 400) break;
-    const timeoutMs = Math.max(700, Math.min(PER_REQUEST_TIMEOUT_MS, remaining - 200));
+    const timeoutMs = Math.max(600, Math.min(1100, remaining - 100));
     let res;
     try {
       res = await doCall({ useModel, timeoutMs });
@@ -380,8 +379,8 @@ async function callGeminiAnswer({ question, audioBase64, notes, model = GEMINI_M
     const body = {
       contents: [{ role: 'user', parts }],
       generationConfig: {
-        temperature: 0.3,
-        maxOutputTokens: 220
+        temperature: 0.2,
+        maxOutputTokens: 180
       }
     };
     if (withGrounding) {
@@ -404,19 +403,20 @@ async function callGeminiAnswer({ question, audioBase64, notes, model = GEMINI_M
     const res = await httpRequest(options, Buffer.from(payload), { timeoutMs, maxRedirects: 0 });
     return res;
   }
-  // Attempt chain with tight per-request timeout and total budget
-  const TOTAL_BUDGET_MS = 6500;
-  const PER_REQUEST_TIMEOUT_MS = 2200;
+  // Attempt chain with front-loaded timeout for first attempt
+  const TOTAL_BUDGET_MS = 6800;
   const startTs = Date.now();
   const chain = [model].concat(Array.isArray(GEMINI_FALLBACK_MODELS) ? GEMINI_FALLBACK_MODELS : []);
-  for (const useModel of chain) {
+  for (let idx = 0; idx < chain.length; idx++) {
+    const useModel = chain[idx];
     const tryGroundingFirst = !!ENABLE_GOOGLE_GROUNDING;
     const attemptGrounding = tryGroundingFirst ? [true, false] : [false];
     for (const withGrounding of attemptGrounding) {
       const elapsed = Date.now() - startTs;
       const remaining = Math.max(0, TOTAL_BUDGET_MS - elapsed);
       if (remaining < 400) break; // not enough time left
-      const timeoutMs = Math.max(700, Math.min(PER_REQUEST_TIMEOUT_MS, remaining - 200));
+      const desired = idx === 0 ? 4500 : (idx === 1 ? 1500 : 1200);
+      const timeoutMs = Math.max(700, Math.min(desired, remaining - 200));
       let res;
       try {
         res = await doCall({ withGrounding, useModel, timeoutMs });
@@ -461,7 +461,7 @@ async function getAnswer({ question, audioBase64, notes }) {
       console.error('OpenAI chain failed', (e && e.message) || String(e));
     }
   }
-  throw new Error('No provider configured');
+  return 'Sorry, I could not analyze that just now.';
 }
 
 async function sendProgressiveResponse(handlerInput, speech) {
@@ -629,6 +629,7 @@ async function handleOpenQuestion(handlerInput, questionFromUser) {
   const url = state.lastUrl;
   const offsetMs = typeof ctxOffset === 'number' ? ctxOffset : (state.lastOffsetMs || 0);
 
+  try { console.log('OpenQuestion text:', String(questionFromUser || '').slice(0, 100)); } catch {}
   await sendProgressiveResponse(handlerInput, 'One sec.');
 
   let answer = 'Sorry, I could not get that.';
@@ -718,8 +719,10 @@ const OpenQuestionIntentHandler = {
     return type === 'IntentRequest' && intentName === 'OpenQuestionIntent';
   },
   async handle(handlerInput) {
-    const q = Alexa.getSlotValue(handlerInput.requestEnvelope, 'q') || '';
-    return handleOpenQuestion(handlerInput, q);
+    const slots = handlerInput.requestEnvelope?.request?.intent?.slots || {};
+    const qRaw = Alexa.getSlotValue(handlerInput.requestEnvelope, 'q') || (slots && slots.q && slots.q.value) || '';
+    try { console.log('Slot q received:', String(qRaw || '').slice(0, 100)); } catch {}
+    return handleOpenQuestion(handlerInput, qRaw);
   }
 };
 
