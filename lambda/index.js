@@ -256,6 +256,11 @@ async function probeMp3Metadata(url) {
   return { id3Size, bitrateKbps, bytesPerSecond, firstFrameOffset: pos };
 }
 
+// Injectable indirections for testing
+let fetchFeedFirstItemImpl = fetchFeedFirstItem;
+let resolveFinalMp3UrlImpl = resolveFinalMp3Url;
+let probeMp3MetadataImpl = probeMp3Metadata;
+
 async function fetchMp3Range(url, startByte, endByteInclusive) {
   const headers = {
     'User-Agent': 'PodcastBot/1.0',
@@ -579,12 +584,12 @@ const PlayPodcastIntentHandler = {
     const attributesManager = handlerInput.attributesManager;
     const state = await getState(attributesManager);
     try {
-      const item = await fetchFeedFirstItem(FEED_URL);
+      const item = await fetchFeedFirstItemImpl(FEED_URL);
       if (!item || !item.enclosureUrl) {
         throw new Error('Feed item missing enclosure');
       }
-      const { finalUrl } = await resolveFinalMp3Url(item.enclosureUrl);
-      const meta = await probeMp3Metadata(finalUrl);
+      const { finalUrl } = await resolveFinalMp3UrlImpl(item.enclosureUrl);
+      const meta = await probeMp3MetadataImpl(finalUrl);
       const token = item.guid || item.title || finalUrl;
 
       // Flush pending batch if switching episodes
@@ -609,6 +614,11 @@ const PlayPodcastIntentHandler = {
         lastOffsetMs: resumeOffset
       };
       await saveState(attributesManager, newState);
+
+      try {
+        const host = new URL(finalUrl).host;
+        console.log('PlayPodcast resolved:', (item.title || '').slice(0, 120), 'host:', host);
+      } catch {}
 
       const directive = buildPlayDirective(finalUrl, token, resumeOffset);
       const response = handlerInput.responseBuilder
@@ -1078,5 +1088,15 @@ async function tryPostAndMaybeClear(state, reason) {
   } catch (e) {
     console.error('Webhook post failed:', e.message || e);
   }
+}
+
+// ---------- Test helpers (only enabled under NODE_ENV=test) ----------
+if (process.env.NODE_ENV === 'test') {
+  module.exports._handlers = { PlayPodcastIntentHandler };
+  module.exports._setPlayImpls = (impls = {}) => {
+    if (impls.fetchFeedFirstItem) fetchFeedFirstItemImpl = impls.fetchFeedFirstItem;
+    if (impls.resolveFinalMp3Url) resolveFinalMp3UrlImpl = impls.resolveFinalMp3Url;
+    if (impls.probeMp3Metadata) probeMp3MetadataImpl = impls.probeMp3Metadata;
+  };
 }
 

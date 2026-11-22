@@ -73,6 +73,9 @@ jobs:
       - name: Node syntax check
         run: node --check lambda/index.js
 
+      - name: Run unit test for PlayPodcastIntent (empty slot)
+        run: node lambda/scripts/test-play.js
+
       - name: Create ASK CLI profile config (~/.ask/cli_config)
         env:
           ASK_REFRESH_TOKEN: ${{ secrets.ASK_REFRESH_TOKEN }}
