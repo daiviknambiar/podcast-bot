@@ -920,10 +920,15 @@ const SimpleResponseIntentHandler = {
         speakOutput = 'Say, play Morning Brew, or ask me a question like, what is compute.';
         return rb.speak(speakOutput).reprompt('You can say, play Morning Brew.').getResponse();
       case 'AMAZON.FallbackIntent':
-        // Ask for the question explicitly rather than calling Gemini with empty
+        // Log and ask for the question explicitly rather than calling Gemini with empty
+        try {
+          const type = Alexa.getRequestType(handlerInput.requestEnvelope);
+          const intentName = Alexa.getIntentName(handlerInput.requestEnvelope);
+          console.log('Fallback invoked:', 'type=', type, 'intent=', intentName);
+        } catch {}
         return handlerInput.responseBuilder
-          .speak('What would you like to know?')
-          .reprompt('What would you like to know?')
+          .speak("Sorry, I didn't catch that. Try saying, what is a webhook, or who is Ada Lovelace.")
+          .reprompt('For example, say: what is a webhook.')
           .getResponse();
       case 'AMAZON.StartOverIntent':
         return (async () => {
