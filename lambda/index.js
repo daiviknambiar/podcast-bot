@@ -1383,6 +1383,11 @@ async function tryPostAndMaybeClear(state, reason) {
   if (!batch.questions || batch.questions.length === 0) return;
   const body = Buffer.from(JSON.stringify(batch));
   const u = new URL(PODBOT_WEBHOOK_URL);
+  // Process webhook key: if it contains an "Authorization:" prefix, strip it and use the remainder
+  let authValue = String(PODBOT_WEBHOOK_KEY || '');
+  try {
+    authValue = authValue.replace(/^\s*Authorization\s*:\s*/i, '').trim();
+  } catch {}
   const options = {
     protocol: u.protocol,
     hostname: u.hostname,
@@ -1391,7 +1396,7 @@ async function tryPostAndMaybeClear(state, reason) {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      [PODBOT_AUTH_HEADER]: PODBOT_WEBHOOK_KEY,
+      Authorization: authValue,
       'Content-Length': body.length
     }
   };

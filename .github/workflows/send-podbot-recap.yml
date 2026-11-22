@@ -69,31 +69,15 @@ jobs:
             echo "Missing webhook secrets; aborting."
             exit 1
           fi
-          AUTH_NAME="${PODBOT_AUTH_HEADER:-Authorization}"
+          # The secret holds the full Authorization header value; strip a leading "Authorization:" if present
+          RAW="${PODBOT_WEBHOOK_KEY}"
+          VALUE="$(printf "%s" "$RAW" | sed -E 's/^[[:space:]]*[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn][[:space:]]*:[[:space:]]*//; s/[[:space:]]+$//')"
           # Send without printing secrets; show only HTTP status code
           STATUS="$(curl -sS -o /dev/null -w "%{http_code}" \
-            -H "${AUTH_NAME}: ${PODBOT_WEBHOOK_KEY}" \
+            -H "Authorization: ${VALUE}" \
             -H "Content-Type: application/json" \
             --data-binary @recaps/recap.json \
             "${PODBOT_WEBHOOK_URL}")"
-          if [ "$STATUS" = "401" ]; then
-            # Try common alternate headers
-            for H in "X-PodBot-Key" "X-Podbot-Key" "X-PodBot-Auth" "X-Podbot-Auth" "X-API-Key" "X-Api-Key"; do
-              STATUS="$(curl -sS -o /dev/null -w "%{http_code}" \
-                -H "$H: ${PODBOT_WEBHOOK_KEY}" -H "Content-Type: application/json" \
-                --data-binary @recaps/recap.json "${PODBOT_WEBHOOK_URL}")"
-              [ "$STATUS" != "401" ] && break
-            done
-          fi
-          if [ "$STATUS" = "401" ]; then
-            # Try Authorization schemes
-            for SCHEME in "Bearer" "Key" "Token"; do
-              STATUS="$(curl -sS -o /dev/null -w "%{http_code}" \
-                -H "Authorization: ${SCHEME} ${PODBOT_WEBHOOK_KEY}" -H "Content-Type: application/json" \
-                --data-binary @recaps/recap.json "${PODBOT_WEBHOOK_URL}")"
-              [ "$STATUS" != "401" ] && break
-            done
-          fi
           echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
           # Fail if not 2xx
           case "$STATUS" in
