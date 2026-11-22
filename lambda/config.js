@@ -11,6 +11,8 @@ module.exports = {
   LOOKBACK_SECONDS: 75,
   FEED_URL: 'https://feeds.megaphone.fm/MOBI8777994188',
   // Grounding disabled by default; it often has separate/zero quota
-  ENABLE_GOOGLE_GROUNDING: false
+  ENABLE_GOOGLE_GROUNDING: false,
+  // Q&A resume behavior: if false, let Alexa auto-resume without sending an AudioPlayer directive
+  RESUME_WITH_DIRECTIVE: false
 };
 

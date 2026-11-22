@@ -29,6 +29,45 @@
           ]
         },
         {
+          "name": "GeneralQueryIntent",
+          "slots": [
+            { "name": "q", "type": "AMAZON.SearchQuery" }
+          ],
+          "samples": [
+            "when {q}",
+            "where {q}",
+            "which {q}",
+            "did {q}",
+            "does {q}",
+            "do {q}",
+            "is {q}",
+            "are {q}",
+            "was {q}",
+            "were {q}",
+            "can {q}",
+            "could {q}",
+            "will {q}",
+            "should {q}",
+            "has {q}",
+            "have {q}",
+            "tell me {q}",
+            "i want to know {q}",
+            "do you know {q}",
+            "give me {q}",
+            "any news on {q}",
+            "whats the latest on {q}",
+            "ask {q}"
+          ]
+        },
+        {
+          "name": "ResumeAliasIntent",
+          "samples": [
+            "resume",
+            "continue",
+            "keep playing"
+          ]
+        }
+        {
           "name": "OpenQuestionIntent",
           "slots": [
             {

@@ -13,7 +13,8 @@ const {
   ENABLE_GOOGLE_GROUNDING,
   GEMINI_FALLBACK_MODELS,
   OPENAI_MODEL,
-  OPENAI_FALLBACK_MODELS
+  OPENAI_FALLBACK_MODELS,
+  RESUME_WITH_DIRECTIVE
 } = require('./config');
 
 let GEMINI_API_KEY = process.env.GEMINI_API_KEY || null;
@@ -375,7 +376,7 @@ async function callOpenAIAnswer({ question, notes, model = OPENAI_MODEL, totalBu
   throw new Error('OpenAI HTTP 503');
 }
 
-async function callGeminiAnswer({ question, hint, audioBase64, notes, model = GEMINI_MODEL, totalBudgetMs = 6000 }) {
+async function callGeminiAnswer({ question, hint, audioBase64, notes, model = GEMINI_MODEL, totalBudgetMs = 6000, preferGrounding = false }) {
   if (!GEMINI_API_KEY) {
     throw new Error('Missing GEMINI_API_KEY (env or lambda/gemini-key.js)');
   }
@@ -452,7 +453,7 @@ async function callGeminiAnswer({ question, hint, audioBase64, notes, model = GE
   const chain = [model].concat(Array.isArray(GEMINI_FALLBACK_MODELS) ? GEMINI_FALLBACK_MODELS : []);
   for (let idx = 0; idx < chain.length; idx++) {
     const useModel = chain[idx];
-    const tryGroundingFirst = !!ENABLE_GOOGLE_GROUNDING;
+    const tryGroundingFirst = preferGrounding || !!ENABLE_GOOGLE_GROUNDING;
     const attemptGrounding = tryGroundingFirst ? [true, false] : [false];
     for (const withGrounding of attemptGrounding) {
       const elapsed = Date.now() - startTs;
@@ -490,12 +491,12 @@ async function callGeminiAnswer({ question, hint, audioBase64, notes, model = GE
   throw new Error('Gemini HTTP 503');
 }
 
-async function getAnswer({ question, audioBase64, notes, hint, budgetMs = 6000 }) {
+async function getAnswer({ question, audioBase64, notes, hint, budgetMs = 6000, preferGrounding = false }) {
   // Prefer Gemini (grounding off) when key is present
   const start = Date.now();
   if (GEMINI_API_KEY) {
     try {
-      return await callGeminiAnswer({ question, hint, audioBase64, notes, model: GEMINI_MODEL, totalBudgetMs: budgetMs });
+      return await callGeminiAnswer({ question, hint, audioBase64, notes, model: GEMINI_MODEL, totalBudgetMs: budgetMs, preferGrounding });
     } catch (e) {
       console.error('Gemini chain failed', (e && e.message) || String(e));
     }
@@ -671,8 +672,17 @@ const PlayPodcastIntentHandler = {
       }
 
       const sameEpisode =
-        state.lastToken && state.lastToken === token && state.lastUrl === finalUrl;
-      const resumeOffset = sameEpisode ? (state.lastOffsetMs || 0) : 0;
+        !!state.lastUrl && state.lastUrl === finalUrl;
+      // Choose safest resume offset when same episode
+      let resumeOffset = 0;
+      if (sameEpisode) {
+        const ctx = handlerInput.requestEnvelope?.context?.AudioPlayer || {};
+        const ctxOffset = typeof ctx.offsetInMilliseconds === 'number' ? ctx.offsetInMilliseconds : null;
+        const saved = typeof state.lastOffsetMs === 'number' ? state.lastOffsetMs : 0;
+        // Guard: do not overwrite a non-zero saved offset with a zero context offset
+        resumeOffset = (ctxOffset && ctxOffset > 0) ? ctxOffset : (saved > 0 ? saved : 0);
+        console.log('PlayPodcast resume decision:', { ctxOffset, saved, resumeOffset });
+      }
 
       // Save current episode metadata for resume and Q&A
       const newState = {
@@ -781,6 +791,7 @@ async function handleOpenQuestion(handlerInput, questionFromUser, carrierWord) {
     const elapsed = Date.now() - qaStart;
     const remainingForLLM = Math.max(800, QA_TOTAL_MS - elapsed);
     const hint = carrierWord ? `${carrierWord} ${qText}` : qText;
+    const isEpisodeQuestion = /\b(they|this|that|it|episode|podcast|host|hosts)\b/i.test(`${carrierWord || ''} ${qText}`);
     // Bound the entire answer generation to remainingForLLM
     answer = await withTimeout(
       answerCaller({
@@ -788,7 +799,8 @@ async function handleOpenQuestion(handlerInput, questionFromUser, carrierWord) {
         hint,
         audioBase64,
         notes: state.lastNotes || '',
-        budgetMs: remainingForLLM
+        budgetMs: remainingForLLM,
+        preferGrounding: !isEpisodeQuestion
       }),
       Math.max(700, remainingForLLM - 100),
       'getAnswer'
@@ -815,6 +827,9 @@ async function handleOpenQuestion(handlerInput, questionFromUser, carrierWord) {
       episodeUrl: persisted.lastUrl || ''
     });
     persisted.questionsPending = list;
+    try {
+      console.log('Q&A final answer (truncated):', String(answer || '').slice(0, 300));
+    } catch {}
     if (!persisted.questionConfirmSpoken) {
       answer = `${answer} I'll send a deeper recap of your questions when the episode's done.`;
       persisted.questionConfirmSpoken = true;
@@ -826,10 +841,9 @@ async function handleOpenQuestion(handlerInput, questionFromUser, carrierWord) {
 
   const rb = handlerInput.responseBuilder.speak(answer);
   if (wasPlaying && state.lastUrl && state.lastToken != null) {
-    // Resume automatically at the freshest offset
     const resumeOffset = getLatestOffsetMs(handlerInput.requestEnvelope, state);
-    console.log('Q&A resume: url=', state.lastUrl, 'token=', state.lastToken, 'offsetMs=', resumeOffset);
-    // Persist the offset used
+    console.log('Q&A resume candidate: url=', state.lastUrl, 'token=', state.lastToken, 'offsetMs=', resumeOffset);
+    // Persist the offset seen
     try {
       state.lastOffsetMs = resumeOffset;
       await saveState(attributesManager, state);
@@ -837,8 +851,16 @@ async function handleOpenQuestion(handlerInput, questionFromUser, carrierWord) {
     } catch (e) {
       console.log('Save offset after Q&A failed:', e && e.message);
     }
-    const directive = buildPlayDirective(state.lastUrl, state.lastToken, resumeOffset);
-    return rb.addDirective(directive).withShouldEndSession(true).getResponse();
+    if (RESUME_WITH_DIRECTIVE) {
+      // Use a fresh token to avoid device ignoring a replay
+      const freshToken = `${state.lastToken}|resume|${Date.now()}`;
+      state.lastToken = freshToken;
+      await saveState(attributesManager, state);
+      const directive = buildPlayDirective(state.lastUrl, freshToken, resumeOffset);
+      return rb.addDirective(directive).withShouldEndSession(true).getResponse();
+    }
+    // Let Alexa auto-resume without directive
+    return rb.withShouldEndSession(true).getResponse();
   }
   return rb.reprompt('You can say, play Morning Brew.').getResponse();
 }
@@ -896,6 +918,7 @@ const WhyIntentHandler = makeCarrierHandler('WhyIntent', 'why is');
 const HowIntentHandler = makeCarrierHandler('HowIntent', 'how');
 const ExplainIntentHandler = makeCarrierHandler('ExplainIntent', 'explain');
 const DefineIntentHandler = makeCarrierHandler('DefineIntent', 'define');
+const GeneralQueryIntentHandler = makeCarrierHandler('GeneralQueryIntent', null);
 
 const PauseIntentHandler = {
   canHandle(handlerInput) {
@@ -930,7 +953,7 @@ const ResumeIntentHandler = {
     const type = Alexa.getRequestType(handlerInput.requestEnvelope);
     if (type !== 'IntentRequest') return false;
     const name = Alexa.getIntentName(handlerInput.requestEnvelope) || '';
-    return (name === 'AMAZON.ResumeIntent');
+    return (name === 'AMAZON.ResumeIntent' || name === 'ResumeAliasIntent');
   },
   async handle(handlerInput) {
     const state = await getState(handlerInput.attributesManager);
@@ -1088,7 +1111,30 @@ const PlaybackFailedHandler = {
   },
   handle(handlerInput) {
     // Log and move on
-    console.error('PlaybackFailed:', JSON.stringify(handlerInput.requestEnvelope.request, null, 2));
+    const req = handlerInput.requestEnvelope.request || {};
+    console.error('PlaybackFailed:', {
+      token: req.token,
+      error: req.error || {},
+      currentPlaybackState: req.currentPlaybackState || {}
+    });
+    return handlerInput.responseBuilder.getResponse();
+  }
+};
+
+const SystemExceptionEncounteredHandler = {
+  canHandle(handlerInput) {
+    return Alexa.getRequestType(handlerInput.requestEnvelope) === 'System.ExceptionEncountered';
+  },
+  handle(handlerInput) {
+    try {
+      const r = handlerInput.requestEnvelope.request || {};
+      console.error('System.ExceptionEncountered:', {
+        error: r.error || {},
+        cause: r.cause || {}
+      });
+    } catch (e) {
+      console.error('System.ExceptionEncountered log error:', e && e.message);
+    }
     return handlerInput.responseBuilder.getResponse();
   }
 };
@@ -1170,11 +1216,23 @@ const LoggingRequestInterceptor = {
           const ctx = handlerInput.requestEnvelope?.context?.AudioPlayer || {};
           const activity = ctx.playerActivity;
           const off = typeof ctx.offsetInMilliseconds === 'number' ? ctx.offsetInMilliseconds : null;
+          const state = await getState(handlerInput.attributesManager);
+          const saved = typeof state.lastOffsetMs === 'number' ? state.lastOffsetMs : 0;
           if ((activity === 'PAUSED' || activity === 'STOPPED') && off != null) {
+            // Guard: avoid overwriting a non-zero saved offset with zero from context
+            if (off === 0 && saved > 0) {
+              console.log('Skip saving offset 0 over saved non-zero during IntentRequest; saved remains', saved);
+            } else {
+              state.lastOffsetMs = off;
+              await saveState(handlerInput.attributesManager, state);
+              console.log('Saved offset from IntentRequest context:', off, 'activity:', activity);
+            }
+          } else if (activity === 'PLAYING' && off != null && off > saved) {
+            // Opportunistic upgrade when playing
             const state = await getState(handlerInput.attributesManager);
             state.lastOffsetMs = off;
             await saveState(handlerInput.attributesManager, state);
-            console.log('Saved offset from IntentRequest context:', off, 'activity:', activity);
+            console.log('Upgraded saved offset from PLAYING context:', off);
           }
         } catch (e) {
           console.log('Save offset from IntentRequest failed:', e && e.message);
@@ -1266,12 +1324,14 @@ exports.handler = skillBuilder
     PlayPodcastIntentHandler,
     SkipForwardIntentHandler,
     SkipBackIntentHandler,
+    SystemExceptionEncounteredHandler,
     WhoIntentHandler,
     WhatIntentHandler,
     WhyIntentHandler,
     HowIntentHandler,
     ExplainIntentHandler,
     DefineIntentHandler,
+    GeneralQueryIntentHandler,
     AskAboutIntentHandler,
     OpenQuestionIntentHandler,
     PauseIntentHandler,

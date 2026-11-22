@@ -256,3 +256,47 @@ jobs:
           });
           req.end(body);
           NODE
+
+      - name: Gemini grounded smoke (no secrets in logs)
+        continue-on-error: true
+        run: |
+          node - <<'NODE'
+          const https = require('https');
+          let key;
+          try { key = require('./lambda/gemini-key.js').GEMINI_API_KEY; } catch {}
+          if (!key || String(key).trim().length === 0) {
+            console.log('GEMINI_GROUNDED_SMOKE: key missing, skipping');
+            process.exit(0);
+          }
+          const model = 'models/gemini-flash-lite-latest';
+          const body = JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: 'Who is the current CEO of SpaceX? One short sentence.' }] }],
+            tools: [{ googleSearchRetrieval: {} }],
+            generationConfig: { maxOutputTokens: 24, temperature: 0.2 }
+          });
+          const modelName = model.startsWith('models/') ? model.slice(7) : model;
+          const options = {
+            protocol: 'https:',
+            hostname: 'generativelanguage.googleapis.com',
+            port: 443,
+            path: '/v1beta/models/' + encodeURIComponent(modelName) + ':generateContent',
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), 'x-goog-api-key': key }
+          };
+          const start = Date.now();
+          const req = https.request(options, (res) => {
+            const chunks = [];
+            res.on('data', (d) => chunks.push(d));
+            res.on('end', () => {
+              const ms = Date.now() - start;
+              const text = Buffer.concat(chunks).toString('utf8').slice(0, 120).replace(/\\s+/g,' ').trim();
+              console.log(`GEMINI_GROUNDED_SMOKE: model=${model} status=${res.statusCode} latencyMs=${ms} excerpt=${JSON.stringify(text)}`);
+            });
+          });
+          req.setTimeout(3500, () => { req.destroy(new Error('timeout')); });
+          req.on('error', (e) => {
+            const ms = Date.now() - start;
+            console.log(`GEMINI_GROUNDED_SMOKE: model=${model} error=${JSON.stringify(e.message || String(e))} latencyMs=${ms}`);
+          });
+          req.end(body);
+          NODE
