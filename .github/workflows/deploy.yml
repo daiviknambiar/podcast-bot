@@ -329,6 +329,7 @@ jobs:
 
       - name: Update interaction model via SMAPI (en-US)
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
+        continue-on-error: true
         run: |
           ask smapi set-interaction-model -s "$SKILL_ID" --stage development --locale en-US --interaction-model file:skill-package/interactionModels/custom/en-US.json --profile default
 
@@ -433,7 +434,7 @@ jobs:
               STATUS="$(echo "$OUT" | jq -r '.status? // empty')"
               echo "Simulation status: ${STATUS:-<unknown>}"
               if [ "$STATUS" = "SUCCESSFUL" ] || [ "$STATUS" = "FAILED" ]; then
-                echo "$OUT" | jq -r '{resolvedIntent: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationResponse?.body?.response?.directives? // empty, outputSpeech: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationResponse?.body?.response?.outputSpeech? // empty}'
+                echo "$OUT" | jq -r '{intentName: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationRequest?.body?.request?.intent?.name, slots: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationRequest?.body?.request?.intent?.slots, outputSpeech: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationResponse?.body?.response?.outputSpeech}'
                 break
               fi
               sleep 2
@@ -452,7 +453,7 @@ jobs:
               STATUS="$(echo "$OUT" | jq -r '.status? // empty')"
               echo "Simulation status: ${STATUS:-<unknown>}"
               if [ "$STATUS" = "SUCCESSFUL" ] || [ "$STATUS" = "FAILED" ]; then
-                echo "$OUT" | jq -r '{resolvedIntent: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationResponse?.body?.response?.directives? // empty, outputSpeech: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationResponse?.body?.response?.outputSpeech? // empty}'
+                echo "$OUT" | jq -r '{intentName: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationRequest?.body?.request?.intent?.name, slots: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationRequest?.body?.request?.intent?.slots, outputSpeech: .result?.alexaExecutionInfo?.skillExecutionInfo?.invocationResponse?.body?.response?.outputSpeech}'
                 break
               fi
               sleep 2
