@@ -76,6 +76,21 @@ jobs:
             -H "Content-Type: application/json" \
             --data-binary @recaps/recap.json \
             "${PODBOT_WEBHOOK_URL}")"
+          if [ "$STATUS" = "401" ]; then
+            # Try common alternate headers
+            for H in "X-PodBot-Key" "X-Api-Key" "Authorization: Bearer ${PODBOT_WEBHOOK_KEY}"; do
+              if echo "$H" | grep -q '^Authorization:'; then
+                STATUS="$(curl -sS -o /dev/null -w "%{http_code}" \
+                  -H "$H" -H "Content-Type: application/json" \
+                  --data-binary @recaps/recap.json "${PODBOT_WEBHOOK_URL}")"
+              else
+                STATUS="$(curl -sS -o /dev/null -w "%{http_code}" \
+                  -H "$H: ${PODBOT_WEBHOOK_KEY}" -H "Content-Type: application/json" \
+                  --data-binary @recaps/recap.json "${PODBOT_WEBHOOK_URL}")"
+              fi
+              [ "$STATUS" != "401" ] && break
+            done
+          fi
           echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
           # Fail if not 2xx
           case "$STATUS" in
