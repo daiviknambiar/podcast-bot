@@ -318,6 +318,8 @@ jobs:
           echo "origin/dev    HEAD: $(git log -1 --format=%H origin/dev || true)"
           echo "GEMINI lines in origin/dev lambda/config.js:"
           git show origin/dev:lambda/config.js | grep -n GEMINI || true
+          echo "Logging interceptor in origin/dev lambda/index.js:"
+          git show origin/dev:lambda/index.js | grep -n 'LoggingRequestInterceptor' || true
 
       - name: Update manifest via SMAPI (development)
         if: steps.push_helper.outcome == 'success' || steps.push_fallback.outcome == 'success'
