@@ -35,7 +35,7 @@ try {
 }
 
 // ---------- Utilities (HTTPS only) ----------
-function httpRequest(options, bodyBuffer, { timeoutMs = 6000, maxRedirects = 5 } = {}) {
+function httpRequest(options, bodyBuffer, { timeoutMs = 6000, maxRedirects = 10 } = {}) {
   return new Promise((resolve, reject) => {
     const visited = [];
     function doReq(opts, redirectsLeft) {
@@ -612,35 +612,10 @@ const PlayPodcastIntentHandler = {
       if (!item || !item.enclosureUrl) {
         throw new Error('Feed item missing enclosure');
       }
-      // Resolve final URL with an overall timeout; fall back to original enclosure
-      async function timeoutAfter(ms, label) {
-        return new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out`)), ms));
-      }
-      console.log('PlayPodcast: before resolveFinalMp3Url');
-      let finalUrl = item.enclosureUrl;
-      try {
-        const out = await Promise.race([
-          resolveFinalMp3UrlImpl(item.enclosureUrl),
-          timeoutAfter(4000, 'resolveFinalMp3Url')
-        ]);
-        if (out && out.finalUrl) finalUrl = out.finalUrl;
-        console.log('PlayPodcast: after resolveFinalMp3Url');
-      } catch (e) {
-        console.log('PlayPodcast: resolveFinalMp3Url failed, using enclosure URL:', (e && e.message) || String(e));
-      }
-      // Probe metadata with timeout; fall back to defaults
-      console.log('PlayPodcast: before probeMp3Metadata');
-      let meta = { id3Size: 0, bitrateKbps: 128, bytesPerSecond: Math.round((128 * 1000) / 8) };
-      try {
-        const out = await Promise.race([
-          probeMp3MetadataImpl(finalUrl),
-          timeoutAfter(4000, 'probeMp3Metadata')
-        ]);
-        if (out && typeof out.bytesPerSecond === 'number') meta = out;
-        console.log('PlayPodcast: after probeMp3Metadata');
-      } catch (e) {
-        console.log('PlayPodcast: probeMp3Metadata failed, using defaults:', (e && e.message) || String(e));
-      }
+      // Low-latency path: use the enclosure URL directly; Alexa will follow redirects.
+      // Defer expensive resolve/probe until needed by Q&A.
+      const finalUrl = item.enclosureUrl;
+      const meta = { id3Size: 0, bitrateKbps: 128, bytesPerSecond: Math.round((128 * 1000) / 8) };
       const token = item.guid || item.title || finalUrl;
 
       // Flush pending batch if switching episodes
@@ -1153,4 +1128,11 @@ if (process.env.NODE_ENV === 'test') {
     if (impls.probeMp3Metadata) probeMp3MetadataImpl = impls.probeMp3Metadata;
   };
 }
+
+// Ensure Lambda returns promptly and doesn't wait for open timers/sockets
+const _skillLambda = exports.handler;
+exports.handler = (event, context, callback) => {
+  try { context.callbackWaitsForEmptyEventLoop = false; } catch {}
+  return _skillLambda(event, context, callback);
+};
 
